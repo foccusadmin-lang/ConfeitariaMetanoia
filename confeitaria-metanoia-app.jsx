@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { db } from "./src/firebase.js";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where } from "firebase/firestore";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
 const FABRICANTE_EMAIL = "nelcialves016@gmail.com";
@@ -82,13 +82,27 @@ function daysAgo(dateStr) {
   return (Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24);
 }
 
-// Data lives in Firestore under metanoia/{products,orders,resellers,stock},
-// each document holding { items: [...] }. Every viewer (client, fabricante,
-// admin) reads and writes the same shared documents in real time.
-const STORAGE_KEYS = ["metanoia_products", "metanoia_orders", "metanoia_resellers", "metanoia_stock"];
+// Data lives in Firestore under the shared "metanoia" collection (matches
+// the security rule /metanoia/{docId}). Products/resellers/stock are each
+// one small document holding { items: [...] } — every viewer (client,
+// fabricante, admin) reads and writes the same shared documents in real
+// time. Orders get their OWN document per order (id "order_<orderId>",
+// tagged kind:"order") instead of one big array: delivery-photo data URIs
+// attached to each order would otherwise push a single combined document
+// past Firestore's 1MB limit after a few dozen orders.
+const STORAGE_KEYS = ["metanoia_products", "metanoia_resellers", "metanoia_stock"];
+const METANOIA_COLLECTION = "metanoia";
+const ordersQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "order"));
 
 function docRef(key) {
-  return doc(db, "metanoia", key);
+  return doc(db, METANOIA_COLLECTION, key);
+}
+function orderDocRef(orderId) {
+  return doc(db, METANOIA_COLLECTION, "order_" + orderId);
+}
+function stripKind(data) {
+  const { kind, ...rest } = data;
+  return rest;
 }
 
 async function loadAll() {
@@ -102,6 +116,13 @@ async function loadAll() {
       out[k] = null;
     }
   }
+  try {
+    const snap = await getDocs(ordersQueryRef());
+    out.metanoia_orders = snap.docs.map((d) => stripKind(d.data()));
+  } catch (e) {
+    console.error("orders read error", e);
+    out.metanoia_orders = null;
+  }
   return out;
 }
 async function save(key, value) {
@@ -109,6 +130,20 @@ async function save(key, value) {
     await setDoc(docRef(key), { items: value });
   } catch (e) {
     console.error("storage write error", e);
+  }
+}
+async function saveOrder(order) {
+  try {
+    await setDoc(orderDocRef(order.id), { kind: "order", ...order });
+  } catch (e) {
+    console.error("order write error", order.id, e);
+  }
+}
+async function deleteOrderDoc(orderId) {
+  try {
+    await deleteDoc(orderDocRef(orderId));
+  } catch (e) {
+    console.error("order delete error", orderId, e);
   }
 }
 // Subscribes to live changes on every key; onChange(key, items) fires
@@ -121,6 +156,13 @@ function subscribeAll(onChange) {
         if (snap.exists()) onChange(k, snap.data().items);
       },
       (e) => console.error("storage subscribe error", k, e)
+    )
+  );
+  unsubs.push(
+    onSnapshot(
+      ordersQueryRef(),
+      (snap) => onChange("metanoia_orders", snap.docs.map((d) => stripKind(d.data()))),
+      (e) => console.error("orders subscribe error", e)
     )
   );
   return () => unsubs.forEach((u) => u());
@@ -915,7 +957,7 @@ export default function App() {
   async function handlePlaceOrder(order) {
     const next = [...orders, order];
     setOrders(next);
-    await save("metanoia_orders", next);
+    await saveOrder(order);
 
     if (order.role === "cliente") {
       const units = order.items.reduce((s, i) => s + i.qty, 0);
@@ -936,19 +978,19 @@ export default function App() {
   async function handleUpdateStatus(orderId, status) {
     const next = orders.map((o) => (o.id === orderId ? { ...o, status } : o));
     setOrders(next);
-    await save("metanoia_orders", next);
+    await saveOrder(next.find((o) => o.id === orderId));
   }
 
   async function handleConfirmDelivery(orderId, photoDataUrl) {
     const next = orders.map((o) => (o.id === orderId ? { ...o, status: "Pedido entregue", deliveryPhoto: photoDataUrl } : o));
     setOrders(next);
-    await save("metanoia_orders", next);
+    await saveOrder(next.find((o) => o.id === orderId));
   }
 
   async function handleDeleteOrder(orderId) {
     const next = orders.filter((o) => o.id !== orderId);
     setOrders(next);
-    await save("metanoia_orders", next);
+    await deleteOrderDoc(orderId);
   }
 
   async function handleRequestReseller(em) {

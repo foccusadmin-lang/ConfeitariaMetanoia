@@ -3,7 +3,8 @@ import { db } from "./src/firebase.js";
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
-const FABRICANTE_EMAIL = "evvuldconfeitaria@gmail.com";
+const FABRICANTE_EMAIL = "nelcialves016@gmail.com";
+const ESTOQUE_EMAIL = "evvuldconfeitaria@gmail.com";
 const PRICE_REVENDA = 6.5;
 const PRICE_CLIENTE = 12.0;
 const RESELLER_THRESHOLD = 30;
@@ -338,7 +339,7 @@ function Login({ onLogin }) {
           Entrar
         </Btn>
         <div style={{ fontSize: 11, color: "#B4B2A9", marginTop: 14 }}>
-          Protótipo: login simulado por e-mail (sem senha). Os e-mails de fabricante e adm abrem seus painéis automaticamente.
+          Protótipo: login simulado por e-mail (sem senha). Os e-mails de fabricante, estoque e adm abrem seus painéis automaticamente.
         </div>
       </Card>
     </div>
@@ -907,6 +908,7 @@ export default function App() {
     setEmail(v);
     if (v === ADMIN_EMAIL) setActiveRole("adm");
     else if (v === FABRICANTE_EMAIL) setActiveRole("fabricante");
+    else if (v === ESTOQUE_EMAIL) setActiveRole("estoque");
     else setActiveRole("cliente");
   }
 
@@ -1032,7 +1034,7 @@ export default function App() {
     <div style={{ fontFamily: "system-ui, sans-serif", background: "#FAF6EF", padding: 24, borderRadius: 16, minHeight: 500 }}>
       <Header email={email} role={activeRole} photoURL={null} onLogout={() => { setEmail(null); setActiveRole(null); }} />
 
-      {(activeRole === "cliente" || activeRole === "revenda") && canSwitchToRevenda && email !== ADMIN_EMAIL && email !== FABRICANTE_EMAIL && (
+      {(activeRole === "cliente" || activeRole === "revenda") && canSwitchToRevenda && email !== ADMIN_EMAIL && email !== FABRICANTE_EMAIL && email !== ESTOQUE_EMAIL && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <Btn variant={activeRole === "cliente" ? "dark" : "ghost"} onClick={() => setActiveRole("cliente")} style={{ padding: "6px 14px", fontSize: 13 }}>Acesso cliente</Btn>
           <Btn variant={activeRole === "revenda" ? "dark" : "ghost"} onClick={() => setActiveRole("revenda")} style={{ padding: "6px 14px", fontSize: 13 }}>Acesso revenda</Btn>

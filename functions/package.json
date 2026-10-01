@@ -1,0 +1,12 @@
+{
+  "name": "functions",
+  "description": "Cloud Functions for Doceria Metanoia (Mercado Pago payments)",
+  "engines": { "node": "20" },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-functions": "^6.0.1",
+    "firebase-admin": "^12.6.0",
+    "mercadopago": "^2.0.15"
+  },
+  "private": true
+}

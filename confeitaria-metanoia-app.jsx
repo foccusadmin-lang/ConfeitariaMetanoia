@@ -873,7 +873,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 }
 
 // ---------- Fabricante ----------
-function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived }) {
+function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder }) {
   const [tab, setTab] = useState("pedidos");
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
@@ -931,6 +931,7 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
           onUpdateStatus={onUpdateStatus}
           onManualResellerToggle={onManualResellerToggle}
           onMarkPaymentReceived={onMarkPaymentReceived}
+          onCreateTestOrder={onCreateTestOrder}
         />
       )}
 
@@ -943,7 +944,7 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
               <div style={{ display: "flex", gap: 10 }}>
                 <Avatar email={o.email} size={32} />
                 <div>
-                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.email} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge></div>
+                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.email} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                   <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
                 </div>
               </div>
@@ -1058,7 +1059,7 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
-function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived }) {
+function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
@@ -1107,6 +1108,10 @@ function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectRe
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Pedidos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{orders.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Revendedores ativos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{activeResellers.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Ingredientes em falta</div><div style={{ fontSize: 22, fontWeight: 700, color: lowStock.length ? "#C4394A" : "#3D2419" }}>{lowStock.length}</div></Card>
+          <Card>
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso sonoro de novo pedido</div>
+            <Btn variant="ghost" style={{ width: "100%" }} onClick={onCreateTestOrder}>🔔 Campainha de teste</Btn>
+          </Card>
         </div>
       )}
 
@@ -1225,7 +1230,7 @@ function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectRe
               <Card key={o.id}>
                 <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                   <div>
-                    <div style={{ fontWeight: 700 }}>{o.email}</div>
+                    <div style={{ fontWeight: 700 }}>{o.email} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                     <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1392,6 +1397,23 @@ export default function App() {
     await deleteOrderDoc(orderId);
   }
 
+  async function handleCreateTestOrder() {
+    const order = {
+      id: uid(),
+      email: "teste@campainha.com",
+      role: "cliente",
+      items: [{ productId: "teste", flavor: "Campainha de teste", qty: 1, unitPrice: 0 }],
+      total: 0,
+      address: "Pedido de teste — pode excluir",
+      whatsapp: "-",
+      status: STATUS_FLOW[0],
+      date: new Date().toISOString(),
+      isTest: true,
+    };
+    setOrders([...orders, order]);
+    await saveOrder(order);
+  }
+
   async function handleMarkPaymentReceived(orderId) {
     const target = orders.find((o) => o.id === orderId);
     if (!target) return;
@@ -1531,6 +1553,7 @@ export default function App() {
           onDeleteOrder={handleDeleteOrder}
           onManualResellerToggle={handleManualResellerToggle}
           onMarkPaymentReceived={handleMarkPaymentReceived}
+          onCreateTestOrder={handleCreateTestOrder}
         />
       )}
 
@@ -1551,6 +1574,7 @@ export default function App() {
             onUpdateStatus={handleUpdateStatus}
             onManualResellerToggle={handleManualResellerToggle}
             onMarkPaymentReceived={handleMarkPaymentReceived}
+            onCreateTestOrder={handleCreateTestOrder}
           />
         </div>
       )}

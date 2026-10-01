@@ -589,6 +589,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [paymentProof, setPaymentProof] = useState(null);
   const [uploadingProof, setUploadingProof] = useState(false);
   const [tab, setTab] = useState("loja");
+  const [showCartModal, setShowCartModal] = useState(false);
 
   const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
@@ -660,7 +661,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, gap: 10 }}>
-        <CartIcon count={cartItems.reduce((s, [, q]) => s + q, 0)} onClick={() => setTab("loja")} />
+        <CartIcon count={cartItems.reduce((s, [, q]) => s + q, 0)} onClick={() => setShowCartModal(true)} />
         <div style={{ display: "flex", gap: 8 }}>
           <Btn variant={tab === "loja" ? "dark" : "ghost"} onClick={() => setTab("loja")}>Painel</Btn>
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Meus pedidos ({myOrders.length})</Btn>
@@ -827,6 +828,44 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
               <DeliveryConfirm order={o} onConfirmDelivery={onConfirmDelivery} />
             </Card>
           ))}
+        </div>
+      )}
+
+      {showCartModal && (
+        <div
+          onClick={() => setShowCartModal(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(61,36,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380 }}>
+            <Card>
+              <div style={{ fontWeight: 700, fontSize: 16, color: "#3D2419", marginBottom: 10 }}>Seu carrinho</div>
+              {cartItems.length === 0 ? (
+                <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum item selecionado ainda.</div>
+              ) : (
+                <div>
+                  {cartItems.map(([id, q]) => {
+                    const p = products.find((pr) => pr.id === id);
+                    return (
+                      <div key={id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                        <span>{q}x Brownie {p.flavor}</span>
+                        <span>{fmtBRL(q * price)}</span>
+                      </div>
+                    );
+                  })}
+                  <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginTop: 8, borderTop: "1px solid #E4E1D6", paddingTop: 8 }}>
+                    <span>Total</span>
+                    <span>{fmtBRL(total)}</span>
+                  </div>
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setShowCartModal(false)}>Fechar</Btn>
+                {cartItems.length > 0 && (
+                  <Btn style={{ flex: 1 }} onClick={() => { setShowCartModal(false); setTab("loja"); }}>Finalizar pedido</Btn>
+                )}
+              </div>
+            </Card>
+          </div>
         </div>
       )}
     </div>

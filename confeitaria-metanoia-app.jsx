@@ -180,8 +180,14 @@ function speakAlert(text) {
     console.error("speech alert error", e);
   }
 }
+function timeGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return "bom dia";
+  if (h < 18) return "boa tarde";
+  return "boa noite";
+}
 function announceNewOrder() {
-  speakAlert("Oiêee! Novo pedido!");
+  speakAlert(`Olá, ${timeGreeting()}. Você tem mais um pedido.`);
 }
 // Browsers only allow audio/speech after a real user gesture on the page,
 // so the "new order" bell has to be explicitly turned on by a click —

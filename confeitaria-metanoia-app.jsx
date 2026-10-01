@@ -17,7 +17,7 @@ const PIX_CNPJ = "68.400.396/0001-06";
 const PIX_MERCHANT_NAME = "Confeitaria/EVVULD";
 const PIX_MERCHANT_CITY = "Jandira";
 const WHATSAPP_NUMBER = "5511965873079";
-const CART_NUDGE_DELAY_MS = 5 * 60 * 1000;
+const CART_NUDGE_DELAY_MS = 20 * 1000; // TEMP: 20s for testing — change back to 5 * 60 * 1000
 const CART_NUDGE_MESSAGE = "Oi! Percebemos que você está há um tempinho com produtos no carrinho, mas ainda não finalizou o pedido. Está tudo bem? Precisando de ajuda, é só chamar aqui no chat que teremos o prazer de te auxiliar! 🧡";
 
 const FLAVOR_COLORS = {
@@ -169,16 +169,19 @@ async function shareApp() {
     window.prompt("Copie o link para indicar:", shareData.url);
   }
 }
-function announceNewOrder() {
+function speakAlert(text) {
   try {
     if (!("speechSynthesis" in window)) return;
-    const utter = new SpeechSynthesisUtterance("Oiêee! Novo pedido!");
+    const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "pt-BR";
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utter);
   } catch (e) {
-    console.error("speech announce error", e);
+    console.error("speech alert error", e);
   }
+}
+function announceNewOrder() {
+  speakAlert("Oiêee! Novo pedido!");
 }
 
 // Data lives in Firestore under the shared "metanoia" collection (matches
@@ -800,14 +803,18 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   }, [role, total]);
 
   // Abandoned-cart nudge: if items sit in the cart for a while with no
-  // checkout, send one automated chat message offering help. Resets once
+  // checkout, send one automated chat message offering help, plus a modal
+  // + spoken alert to actually get the client's attention. Resets once
   // the cart empties (checkout or cleared), so a later cart can nudge again.
   const [cartNudged, setCartNudged] = useState(false);
+  const [showNudgeModal, setShowNudgeModal] = useState(false);
   useEffect(() => {
     if (cartItems.length === 0) { setCartNudged(false); return; }
     if (cartNudged) return;
     const timer = setTimeout(() => {
       onSendChatMessage(email, "sistema", null, CART_NUDGE_MESSAGE);
+      setShowNudgeModal(true);
+      speakAlert("Ei! Precisa de ajuda com o seu pedido?");
       setCartNudged(true);
     }, CART_NUDGE_DELAY_MS);
     return () => clearTimeout(timer);
@@ -1100,6 +1107,25 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 {cartItems.length > 0 && (
                   <Btn style={{ flex: 1 }} onClick={() => { setShowCartModal(false); setTab("loja"); }}>Finalizar pedido</Btn>
                 )}
+              </div>
+            </Card>
+          </div>
+        </div>
+      )}
+
+      {showNudgeModal && (
+        <div
+          onClick={() => setShowNudgeModal(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(61,36,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 360 }}>
+            <Card>
+              <div style={{ fontSize: 32, textAlign: "center", marginBottom: 8 }}>🔔</div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#3D2419", marginBottom: 8, textAlign: "center" }}>Precisa de uma mãozinha?</div>
+              <div style={{ fontSize: 13, color: "#5F5E5A", marginBottom: 14, textAlign: "center" }}>{CART_NUDGE_MESSAGE}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setShowNudgeModal(false)}>Fechar</Btn>
+                <Btn style={{ flex: 1 }} onClick={() => { setShowNudgeModal(false); setTab("chat"); }}>Ir para o chat</Btn>
               </div>
             </Card>
           </div>

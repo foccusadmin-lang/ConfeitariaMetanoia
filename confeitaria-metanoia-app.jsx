@@ -682,18 +682,19 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 }
 
 // ---------- Fabricante ----------
-function Fabricante({ orders, products, stock, onUpdateStatus }) {
+function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle }) {
   const [tab, setTab] = useState("pedidos");
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Pedidos</Btn>
           <Btn variant={tab === "estoque" ? "dark" : "ghost"} onClick={() => setTab("estoque")}>
             Estoque{lowStock.length > 0 && ` (${lowStock.length} em falta)`}
           </Btn>
+          <Btn variant={tab === "administracao" ? "dark" : "ghost"} onClick={() => setTab("administracao")}>Administração</Btn>
         </div>
         {tab === "pedidos" && (
           <div style={{ display: "flex", gap: 8 }}>
@@ -724,6 +725,21 @@ function Fabricante({ orders, products, stock, onUpdateStatus }) {
             ))}
           </div>
         </Card>
+      )}
+
+      {tab === "administracao" && (
+        <Adm
+          orders={orders}
+          products={products}
+          stock={stock}
+          resellers={resellers}
+          onApproveReseller={onApproveReseller}
+          onRejectReseller={onRejectReseller}
+          onToggleProduct={onToggleProduct}
+          onDeleteOrder={onDeleteOrder}
+          onUpdateStatus={onUpdateStatus}
+          onManualResellerToggle={onManualResellerToggle}
+        />
       )}
 
       {tab === "pedidos" && (
@@ -1250,7 +1266,18 @@ export default function App() {
       )}
 
       {activeRole === "fabricante" && (
-        <Fabricante orders={orders} products={products} stock={stock} onUpdateStatus={handleUpdateStatus} />
+        <Fabricante
+          orders={orders}
+          products={products}
+          stock={stock}
+          resellers={resellers}
+          onUpdateStatus={handleUpdateStatus}
+          onApproveReseller={handleApproveReseller}
+          onRejectReseller={handleRejectReseller}
+          onToggleProduct={handleToggleProduct}
+          onDeleteOrder={handleDeleteOrder}
+          onManualResellerToggle={handleManualResellerToggle}
+        />
       )}
 
       {activeRole === "adm" && (

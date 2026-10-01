@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db, googleProvider } from "./src/firebase.js";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where } from "firebase/firestore";
@@ -10,6 +10,9 @@ const PRICE_REVENDA = 6.5;
 const PRICE_CLIENTE = 12.0;
 const RESELLER_THRESHOLD = 30;
 const RESELLER_EXPIRY_DAYS = 30;
+const RESELLER_MIN_ORDER_UNITS = 30;
+const RESELLER_PAYMENT_DAYS = 7;
+const PIX_CNPJ = "68.400.396/0001-06";
 
 const FLAVOR_COLORS = {
   "Maracujá": "#E8A23D",
@@ -107,6 +110,17 @@ async function shareApp() {
     alert("Link copiado! É só colar e enviar pra quem você quiser indicar.");
   } catch (e) {
     window.prompt("Copie o link para indicar:", shareData.url);
+  }
+}
+function announceNewOrder() {
+  try {
+    if (!("speechSynthesis" in window)) return;
+    const utter = new SpeechSynthesisUtterance("Oiêee! Novo pedido!");
+    utter.lang = "pt-BR";
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  } catch (e) {
+    console.error("speech announce error", e);
   }
 }
 
@@ -526,17 +540,63 @@ function CadastroForm({ onSave }) {
   );
 }
 
-function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery }) {
+function SalesReportForm({ order, onSubmit }) {
+  const [vendidos, setVendidos] = useState(() => Object.fromEntries(order.items.map((it) => [it.productId, 0])));
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit() {
+    for (const it of order.items) {
+      const v = Number(vendidos[it.productId]);
+      if (!Number.isFinite(v) || v < 0 || v > it.qty) { setErr(`Quantidade vendida de ${it.flavor} deve ser entre 0 e ${it.qty}.`); return; }
+    }
+    setErr("");
+    setSaving(true);
+    try {
+      await onSubmit(order.id, order.items.map((it) => {
+        const v = Number(vendidos[it.productId]) || 0;
+        return { productId: it.productId, flavor: it.flavor, vendidos: v, restantes: it.qty - v };
+      }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid #E4E1D6", paddingTop: 10 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#3D2419", marginBottom: 6 }}>Informe as vendas desse pedido</div>
+      {order.items.map((it) => (
+        <div key={it.productId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 4 }}>
+          <span>{it.flavor} ({it.qty} un.)</span>
+          <input
+            type="number" min={0} max={it.qty}
+            value={vendidos[it.productId]}
+            onChange={(e) => setVendidos((v) => ({ ...v, [it.productId]: e.target.value }))}
+            style={{ width: 64, padding: 6, borderRadius: 6, border: "1px solid #D3D1C7" }}
+          />
+        </div>
+      ))}
+      {err && <div style={{ color: "#C4394A", fontSize: 12, marginTop: 4 }}>{err}</div>}
+      <Btn style={{ marginTop: 8, width: "100%" }} disabled={saving} onClick={handleSubmit}>{saving ? "Enviando…" : "Enviar relatório de vendas"}</Btn>
+    </div>
+  );
+}
+
+function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport }) {
   const [cart, setCart] = useState({});
   const [addr, setAddr] = useState("");
   const [whats, setWhats] = useState("");
+  const [paymentProof, setPaymentProof] = useState(null);
+  const [uploadingProof, setUploadingProof] = useState(false);
   const [tab, setTab] = useState("loja");
 
   const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
   const cartItems = Object.entries(cart).filter(([, q]) => q > 0);
   const total = cartItems.reduce((s, [, q]) => s + q * price, 0);
+  const totalUnits = cartItems.reduce((s, [, q]) => s + q, 0);
   const myOrders = orders.filter((o) => o.email === email).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const pendingConsignment = myOrders.find((o) => o.role === "revenda" && o.paymentType === "consignado" && o.paymentStatus !== "pago");
 
   const canRequestReseller = role === "cliente" && (!resellerInfo || resellerInfo.status === "inativo");
   const pendingRequest = resellerInfo && resellerInfo.status === "pendente";
@@ -545,11 +605,29 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
     setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + delta) }));
   }
 
+  async function handleProofUpload(file) {
+    if (!file) return;
+    setUploadingProof(true);
+    try {
+      setPaymentProof(await fileToCompressedDataURL(file));
+    } finally {
+      setUploadingProof(false);
+    }
+  }
+
+  function copyPixKey() {
+    navigator.clipboard?.writeText(PIX_CNPJ).then(
+      () => alert("Chave Pix copiada!"),
+      () => {}
+    );
+  }
+
   function checkout() {
     if (cartItems.length === 0) return;
     if (!cadastro) { alert("Finalize seu cadastro (pessoa física ou jurídica) antes de fazer o pedido."); return; }
     if (!addr.trim() || !whats.trim()) { alert("Preencha endereço e WhatsApp para finalizar o pedido."); return; }
-    onPlaceOrder({
+
+    const baseOrder = {
       id: uid(),
       email,
       role,
@@ -562,8 +640,21 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
       whatsapp: whats,
       status: STATUS_FLOW[0],
       date: new Date().toISOString(),
-    });
-    setCart({});
+    };
+
+    if (role === "revenda") {
+      if (pendingConsignment) { alert("Você ainda tem uma consignação em aberto. Informe as vendas e aguarde a confirmação do pagamento antes de fazer um novo pedido."); return; }
+      if (totalUnits < RESELLER_MIN_ORDER_UNITS) { alert(`Pedidos de revenda precisam de no mínimo ${RESELLER_MIN_ORDER_UNITS} unidades (você selecionou ${totalUnits}).`); return; }
+      const dueDate = new Date();
+      dueDate.setDate(dueDate.getDate() + RESELLER_PAYMENT_DAYS);
+      onPlaceOrder({ ...baseOrder, paymentType: "consignado", paymentStatus: "pendente", paymentDueDate: dueDate.toISOString() });
+      setCart({}); setAddr(""); setWhats("");
+      return;
+    }
+
+    if (!paymentProof) { alert("Envie o comprovante do pagamento via Pix para finalizar o pedido."); return; }
+    onPlaceOrder({ ...baseOrder, paymentMethod: "Pix", paymentProof });
+    setCart({}); setAddr(""); setWhats(""); setPaymentProof(null);
   }
 
   return (
@@ -646,13 +737,53 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                   <span>Total</span>
                   <span>{fmtBRL(total)}</span>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
-                  <input placeholder="Endereço de entrega" value={addr} onChange={(e) => setAddr(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
-                  <input placeholder="WhatsApp" value={whats} onChange={(e) => setWhats(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
-                </div>
-                <Btn style={{ marginTop: 12, width: "100%" }} disabled={!cadastro} onClick={checkout}>
-                  {cadastro ? "Finalizar pedido" : "Complete seu cadastro acima"}
-                </Btn>
+                {role === "revenda" && pendingConsignment ? (
+                  <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "#FBEAF0", color: "#72243E", fontSize: 13 }}>
+                    Você tem uma consignação em aberto (vence em {new Date(pendingConsignment.paymentDueDate).toLocaleDateString("pt-BR")}).
+                    Informe as vendas e aguarde a confirmação do pagamento em "Meus pedidos" antes de fazer um novo pedido.
+                  </div>
+                ) : (
+                  <>
+                    {role === "revenda" && (
+                      <div style={{ marginTop: 12, fontSize: 12, color: "#8A7A63" }}>
+                        Pedido mínimo de revenda: {RESELLER_MIN_ORDER_UNITS} unidades ({totalUnits} selecionadas) · Pagamento consignado, com {RESELLER_PAYMENT_DAYS} dias de prazo após a entrega.
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
+                      <input placeholder="Endereço de entrega" value={addr} onChange={(e) => setAddr(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
+                      <input placeholder="WhatsApp" value={whats} onChange={(e) => setWhats(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
+                    </div>
+                    {role === "cliente" && (
+                      <div style={{ marginTop: 12, padding: 10, borderRadius: 8, border: "1px solid #D3D1C7" }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: "#3D2419", marginBottom: 4 }}>Pagamento via Pix</div>
+                        <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Chave Pix (CNPJ): <strong>{PIX_CNPJ}</strong></div>
+                        <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={copyPixKey}>Copiar chave Pix</Btn>
+                        <div style={{ marginTop: 10 }}>
+                          <label>
+                            <input
+                              type="file" accept="image/*" style={{ display: "none" }} disabled={uploadingProof}
+                              onChange={(e) => handleProofUpload(e.target.files && e.target.files[0])}
+                            />
+                            <span>
+                              <Btn variant="ghost" disabled={uploadingProof} style={{ padding: "6px 14px", fontSize: 12 }}>
+                                {uploadingProof ? "Enviando…" : paymentProof ? "Trocar comprovante" : "📎 Enviar comprovante de pagamento"}
+                              </Btn>
+                            </span>
+                          </label>
+                          {paymentProof && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                              <img src={paymentProof} alt="Comprovante" style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover" }} />
+                              <span style={{ fontSize: 12, color: "#8A7A63" }}>Comprovante anexado</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    <Btn style={{ marginTop: 12, width: "100%" }} disabled={!cadastro} onClick={checkout}>
+                      {cadastro ? "Finalizar pedido" : "Complete seu cadastro acima"}
+                    </Btn>
+                  </>
+                )}
               </div>
             )}
           </Card>
@@ -672,6 +803,27 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor}</div>)}
               </div>
               <div style={{ fontWeight: 700, marginTop: 6 }}>{fmtBRL(o.total)}</div>
+              {o.paymentMethod === "Pix" && o.paymentProof && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                  <img src={o.paymentProof} alt="Comprovante Pix" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />
+                  <span style={{ fontSize: 12, color: "#8A7A63" }}>Comprovante Pix enviado</span>
+                </div>
+              )}
+              {o.paymentType === "consignado" && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "#8A7A63" }}>
+                  Consignado · vence em {new Date(o.paymentDueDate).toLocaleDateString("pt-BR")} ·{" "}
+                  <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
+                </div>
+              )}
+              {o.paymentType === "consignado" && !o.salesReport && (
+                <SalesReportForm order={o} onSubmit={onSubmitSalesReport} />
+              )}
+              {o.salesReport && (
+                <div style={{ marginTop: 10, borderTop: "1px solid #E4E1D6", paddingTop: 10, fontSize: 12, color: "#8A7A63" }}>
+                  <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 4 }}>Vendas informadas</div>
+                  {o.salesReport.items.map((it) => <div key={it.productId}>{it.flavor}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
+                </div>
+              )}
               <DeliveryConfirm order={o} onConfirmDelivery={onConfirmDelivery} />
             </Card>
           ))}
@@ -682,7 +834,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 }
 
 // ---------- Fabricante ----------
-function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle }) {
+function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived }) {
   const [tab, setTab] = useState("pedidos");
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
@@ -739,6 +891,7 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
           onDeleteOrder={onDeleteOrder}
           onUpdateStatus={onUpdateStatus}
           onManualResellerToggle={onManualResellerToggle}
+          onMarkPaymentReceived={onMarkPaymentReceived}
         />
       )}
 
@@ -767,6 +920,27 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
                 <span style={{ fontSize: 12, color: "#8A7A63" }}>Foto de confirmação enviada pelo cliente</span>
               </div>
             )}
+            {o.paymentMethod === "Pix" && o.paymentProof && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <img src={o.paymentProof} alt="Comprovante Pix" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
+                <span style={{ fontSize: 12, color: "#8A7A63" }}>Comprovante Pix do cliente</span>
+              </div>
+            )}
+            {o.paymentType === "consignado" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "#8A7A63" }}>Consignado · vence em {new Date(o.paymentDueDate).toLocaleDateString("pt-BR")}</span>
+                <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
+                {o.paymentStatus !== "pago" && (
+                  <Btn variant="ghost" style={{ padding: "2px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
+                )}
+              </div>
+            )}
+            {o.salesReport && (
+              <div style={{ marginBottom: 8, fontSize: 12, color: "#8A7A63" }}>
+                <div style={{ fontWeight: 700, color: "#3D2419" }}>Vendas informadas pelo revendedor</div>
+                {o.salesReport.items.map((it) => <div key={it.productId}>{it.flavor}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <select
                 value={o.status}
@@ -775,6 +949,7 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
               >
                 {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
+              <Btn variant="danger" style={{ padding: "8px 14px", fontSize: 13 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
             </div>
           </Card>
         ))}
@@ -844,7 +1019,7 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
-function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle }) {
+function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
@@ -1014,8 +1189,14 @@ function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectRe
                     <div style={{ fontWeight: 700 }}>{o.email}</div>
                     <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <StatusBadge status={o.status} />
+                    {o.paymentType === "consignado" && (
+                      <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
+                    )}
+                    {o.paymentType === "consignado" && o.paymentStatus !== "pago" && (
+                      <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
+                    )}
                     <Btn variant="danger" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
                   </div>
                 </div>
@@ -1095,6 +1276,22 @@ export default function App() {
     );
   }, [email]);
 
+  // Announce brand-new orders to fabricante/adm with a spoken alert. The
+  // ref starts at null so the first population (existing orders loading
+  // in) never triggers it — only orders that arrive afterwards do.
+  const knownOrderIds = useRef(null);
+  useEffect(() => {
+    if (knownOrderIds.current === null) {
+      knownOrderIds.current = new Set(orders.map((o) => o.id));
+      return;
+    }
+    const isNew = orders.some((o) => !knownOrderIds.current.has(o.id));
+    if (isNew && (activeRole === "fabricante" || activeRole === "adm")) {
+      announceNewOrder();
+    }
+    knownOrderIds.current = new Set(orders.map((o) => o.id));
+  }, [orders, activeRole]);
+
   const myResellerInfo = useMemo(() => resellers.find((r) => r.email === email), [resellers, email]);
 
   async function handleLogin() {
@@ -1154,6 +1351,22 @@ export default function App() {
     const next = orders.filter((o) => o.id !== orderId);
     setOrders(next);
     await deleteOrderDoc(orderId);
+  }
+
+  async function handleMarkPaymentReceived(orderId) {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    const updated = { ...target, paymentStatus: "pago" };
+    setOrders(orders.map((o) => (o.id === orderId ? updated : o)));
+    await saveOrder(updated);
+  }
+
+  async function handleSubmitSalesReport(orderId, items) {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    const updated = { ...target, salesReport: { items, reportedAt: new Date().toISOString() } };
+    setOrders(orders.map((o) => (o.id === orderId ? updated : o)));
+    await saveOrder(updated);
   }
 
   async function handleRequestReseller(em) {
@@ -1262,6 +1475,7 @@ export default function App() {
           onPlaceOrder={handlePlaceOrder}
           onRequestReseller={handleRequestReseller}
           onConfirmDelivery={handleConfirmDelivery}
+          onSubmitSalesReport={handleSubmitSalesReport}
         />
       )}
 
@@ -1277,6 +1491,7 @@ export default function App() {
           onToggleProduct={handleToggleProduct}
           onDeleteOrder={handleDeleteOrder}
           onManualResellerToggle={handleManualResellerToggle}
+          onMarkPaymentReceived={handleMarkPaymentReceived}
         />
       )}
 
@@ -1296,6 +1511,7 @@ export default function App() {
             onDeleteOrder={handleDeleteOrder}
             onUpdateStatus={handleUpdateStatus}
             onManualResellerToggle={handleManualResellerToggle}
+            onMarkPaymentReceived={handleMarkPaymentReceived}
           />
         </div>
       )}

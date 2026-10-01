@@ -82,6 +82,23 @@ function fileToCompressedDataURL(file, maxW = 480, quality = 0.6) {
 function daysAgo(dateStr) {
   return (Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24);
 }
+async function shareApp() {
+  const shareData = {
+    title: "Doceria Metanoia",
+    text: "Conheça a Doceria Metanoia — brownies artesanais!",
+    url: window.location.origin,
+  };
+  if (navigator.share) {
+    try { await navigator.share(shareData); return; }
+    catch (e) { if (e && e.name === "AbortError") return; }
+  }
+  try {
+    await navigator.clipboard.writeText(shareData.url);
+    alert("Link copiado! É só colar e enviar pra quem você quiser indicar.");
+  } catch (e) {
+    window.prompt("Copie o link para indicar:", shareData.url);
+  }
+}
 
 // Data lives in Firestore under the shared "metanoia" collection (matches
 // the security rule /metanoia/{docId}). Products/resellers/stock are each
@@ -145,6 +162,18 @@ async function deleteOrderDoc(orderId) {
     await deleteDoc(orderDocRef(orderId));
   } catch (e) {
     console.error("order delete error", orderId, e);
+  }
+}
+// One cadastro (pessoa física/jurídica) document per client, keyed by their
+// own e-mail — a client must finish this before placing an order.
+function clienteDocRef(email) {
+  return doc(db, METANOIA_COLLECTION, "cliente_" + email);
+}
+async function saveCliente(email, data) {
+  try {
+    await setDoc(clienteDocRef(email), { kind: "cliente", email, ...data, updatedAt: new Date().toISOString() });
+  } catch (e) {
+    console.error("cliente save error", email, e);
   }
 }
 // Subscribes to live changes on every key; onChange(key, items) fires
@@ -342,6 +371,13 @@ function Header({ email, role, photoURL, onLogout }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Avatar email={email} photoURL={photoURL} size={32} />
         <span style={{ fontSize: 13, color: "#5F5E5A" }}>{email}</span>
+        <Btn variant="ghost" onClick={shareApp} style={{ padding: "6px 14px", fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3D2419" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </svg>
+          Indicar
+        </Btn>
         <Btn variant="ghost" onClick={onLogout} style={{ padding: "6px 14px", fontSize: 13 }}>Sair</Btn>
       </div>
     </div>
@@ -431,7 +467,56 @@ function DeliveryConfirm({ order, onConfirmDelivery }) {
   );
 }
 
-function Storefront({ email, role, products, orders, resellerInfo, onPlaceOrder, onRequestReseller, onConfirmDelivery }) {
+function CadastroForm({ onSave }) {
+  const [tipo, setTipo] = useState("fisica");
+  const [nome, setNome] = useState("");
+  const [documento, setDocumento] = useState("");
+  const [endereco, setEndereco] = useState("");
+  const [telefone, setTelefone] = useState("");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const docLabel = tipo === "fisica" ? "CPF" : "CNPJ";
+  const docLen = tipo === "fisica" ? 11 : 14;
+  const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
+
+  async function handleSave() {
+    const docDigits = documento.replace(/\D/g, "");
+    if (!nome.trim() || !endereco.trim() || !telefone.trim()) { setErr("Preencha todos os campos."); return; }
+    if (docDigits.length !== docLen) { setErr(`${docLabel} inválido — deve ter ${docLen} dígitos.`); return; }
+    setErr("");
+    setSaving(true);
+    try {
+      await onSave({ tipo, nome: nome.trim(), documento: docDigits, endereco: endereco.trim(), telefone: telefone.trim() });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card style={{ marginBottom: 18, background: "#FBEAF0" }}>
+      <div style={{ fontWeight: 700, color: "#72243E", marginBottom: 4 }}>Complete seu cadastro</div>
+      <div style={{ fontSize: 13, color: "#72243E", marginBottom: 14 }}>
+        Para finalizar pedidos, precisamos dos seus dados de pessoa física ou jurídica.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <Btn variant={tipo === "fisica" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setTipo("fisica"); setDocumento(""); setErr(""); }}>Pessoa física</Btn>
+        <Btn variant={tipo === "juridica" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setTipo("juridica"); setDocumento(""); setErr(""); }}>Pessoa jurídica</Btn>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder={tipo === "fisica" ? "Nome completo" : "Razão social"} value={nome} onChange={(e) => setNome(e.target.value)} style={inputStyle} />
+        <input placeholder={docLabel} value={documento} onChange={(e) => setDocumento(e.target.value)} style={inputStyle} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder="Endereço" value={endereco} onChange={(e) => setEndereco(e.target.value)} style={inputStyle} />
+        <input placeholder="Telefone/WhatsApp" value={telefone} onChange={(e) => setTelefone(e.target.value)} style={inputStyle} />
+      </div>
+      {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      <Btn style={{ width: "100%" }} disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : "Salvar cadastro"}</Btn>
+    </Card>
+  );
+}
+
+function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery }) {
   const [cart, setCart] = useState({});
   const [addr, setAddr] = useState("");
   const [whats, setWhats] = useState("");
@@ -452,6 +537,7 @@ function Storefront({ email, role, products, orders, resellerInfo, onPlaceOrder,
 
   function checkout() {
     if (cartItems.length === 0) return;
+    if (!cadastro) { alert("Finalize seu cadastro (pessoa física ou jurídica) antes de fazer o pedido."); return; }
     if (!addr.trim() || !whats.trim()) { alert("Preencha endereço e WhatsApp para finalizar o pedido."); return; }
     onPlaceOrder({
       id: uid(),
@@ -479,6 +565,8 @@ function Storefront({ email, role, products, orders, resellerInfo, onPlaceOrder,
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Meus pedidos ({myOrders.length})</Btn>
         </div>
       </div>
+
+      {!cadastro && <CadastroForm onSave={onSaveCadastro} />}
 
       {role === "cliente" && (
         <Card style={{ marginBottom: 18, background: "#FBEAF0" }}>
@@ -544,7 +632,9 @@ function Storefront({ email, role, products, orders, resellerInfo, onPlaceOrder,
                   <input placeholder="Endereço de entrega" value={addr} onChange={(e) => setAddr(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
                   <input placeholder="WhatsApp" value={whats} onChange={(e) => setWhats(e.target.value)} style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }} />
                 </div>
-                <Btn style={{ marginTop: 12, width: "100%" }} onClick={checkout}>Finalizar pedido</Btn>
+                <Btn style={{ marginTop: 12, width: "100%" }} disabled={!cadastro} onClick={checkout}>
+                  {cadastro ? "Finalizar pedido" : "Complete seu cadastro acima"}
+                </Btn>
               </div>
             )}
           </Card>
@@ -915,6 +1005,7 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [resellers, setResellers] = useState([]);
   const [stock, setStock] = useState(DEFAULT_STOCK);
+  const [cadastro, setCadastro] = useState(null);
 
   const email = user ? user.email.toLowerCase() : null;
 
@@ -957,6 +1048,17 @@ export default function App() {
       else if (key === "metanoia_resellers") setResellers(items);
       else if (key === "metanoia_stock") setStock(items);
     });
+  }, [email]);
+
+  // Cadastro (pessoa física/jurídica) gate: client/revenda can't check out
+  // until this document exists for their e-mail.
+  useEffect(() => {
+    if (!email) { setCadastro(null); return; }
+    return onSnapshot(
+      clienteDocRef(email),
+      (snap) => setCadastro(snap.exists() ? stripKind(snap.data()) : null),
+      (e) => console.error("cadastro subscribe error", e)
+    );
   }, [email]);
 
   const myResellerInfo = useMemo(() => resellers.find((r) => r.email === email), [resellers, email]);
@@ -1121,6 +1223,8 @@ export default function App() {
           products={products}
           orders={orders}
           resellerInfo={myResellerInfo}
+          cadastro={cadastro}
+          onSaveCadastro={(data) => saveCliente(email, data)}
           onPlaceOrder={handlePlaceOrder}
           onRequestReseller={handleRequestReseller}
           onConfirmDelivery={handleConfirmDelivery}

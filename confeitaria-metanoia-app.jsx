@@ -1172,6 +1172,158 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   );
 }
 
+// Lets fabricante/adm hand-register a client that pre-dates this system
+// (e.g. someone who only ever ordered by WhatsApp), so their cadastro
+// exists and old/offline orders can be logged against it.
+function ManualClienteForm() {
+  const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
+  const [email, setEmail] = useState("");
+  const [tipo, setTipo] = useState("fisica");
+  const [nome, setNome] = useState("");
+  const [documento, setDocumento] = useState("");
+  const [endereco, setEndereco] = useState("");
+  const [telefone, setTelefone] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const docLabel = tipo === "fisica" ? "CPF" : "CNPJ";
+  const docLen = tipo === "fisica" ? 11 : 14;
+
+  async function handleSave() {
+    const em = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setErr("Digite um e-mail válido."); setMsg(""); return; }
+    const docDigits = documento.replace(/\D/g, "");
+    if (!nome.trim() || !endereco.trim() || !telefone.trim()) { setErr("Preencha todos os campos."); setMsg(""); return; }
+    if (docDigits.length !== docLen) { setErr(`${docLabel} inválido — deve ter ${docLen} dígitos.`); setMsg(""); return; }
+    setErr(""); setMsg(""); setSaving(true);
+    try {
+      await saveCliente(em, { tipo, nome: nome.trim(), documento: docDigits, endereco: endereco.trim(), telefone: telefone.trim() });
+      setMsg(`Cliente ${em} cadastrado!`);
+      setEmail(""); setNome(""); setDocumento(""); setEndereco(""); setTelefone("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card style={{ marginBottom: 14 }}>
+      <div style={{ fontWeight: 700, marginBottom: 10, color: "#3D2419" }}>Criar cliente</div>
+      <input placeholder="E-mail do cliente" value={email} onChange={(e) => setEmail(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <Btn variant={tipo === "fisica" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setTipo("fisica"); setDocumento(""); }}>Pessoa física</Btn>
+        <Btn variant={tipo === "juridica" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setTipo("juridica"); setDocumento(""); }}>Pessoa jurídica</Btn>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder={tipo === "fisica" ? "Nome completo" : "Razão social"} value={nome} onChange={(e) => setNome(e.target.value)} style={inputStyle} />
+        <input placeholder={docLabel} value={documento} onChange={(e) => setDocumento(e.target.value)} style={inputStyle} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder="Endereço" value={endereco} onChange={(e) => setEndereco(e.target.value)} style={inputStyle} />
+        <input placeholder="Telefone/WhatsApp" value={telefone} onChange={(e) => setTelefone(e.target.value)} style={inputStyle} />
+      </div>
+      {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      {msg && <div style={{ color: "#27500A", fontSize: 12, marginBottom: 8 }}>{msg}</div>}
+      <Btn disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : "Salvar cliente"}</Btn>
+    </Card>
+  );
+}
+
+// Logs an order that already happened outside the system (old WhatsApp/
+// in-person sale) against any client e-mail, with an editable date/status
+// instead of the live checkout flow's Pix/consignment requirements.
+function ManualOrderForm({ products }) {
+  const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("cliente");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 16));
+  const [status, setStatus] = useState("Pedido entregue");
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [address, setAddress] = useState("");
+  const [whatsapp, setWhatsapp] = useState("");
+  const [qtyByProduct, setQtyByProduct] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
+  const items = products.filter((p) => Number(qtyByProduct[p.id]) > 0).map((p) => ({
+    productId: p.id, flavor: p.flavor, qty: Number(qtyByProduct[p.id]), unitPrice: price,
+  }));
+  const total = items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+
+  async function handleSave() {
+    const em = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setErr("Digite um e-mail válido."); setMsg(""); return; }
+    if (items.length === 0) { setErr("Selecione ao menos um item (quantidade maior que zero)."); setMsg(""); return; }
+    setErr(""); setMsg(""); setSaving(true);
+    try {
+      const order = {
+        id: uid(),
+        email: em,
+        role,
+        items,
+        total,
+        address: address.trim() || "Pedido lançado manualmente",
+        whatsapp: whatsapp.trim() || "-",
+        status,
+        date: new Date(date).toISOString(),
+        manualEntry: true,
+      };
+      if (paymentMethod) order.paymentMethod = paymentMethod;
+      await saveOrder(order);
+      setMsg(`Pedido de ${em} lançado!`);
+      setQtyByProduct({});
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card style={{ marginBottom: 14 }}>
+      <div style={{ fontWeight: 700, marginBottom: 10, color: "#3D2419" }}>Lançar pedido antigo</div>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder="E-mail do cliente" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+        <select value={role} onChange={(e) => setRole(e.target.value)} style={inputStyle}>
+          <option value="cliente">Cliente final</option>
+          <option value="revenda">Revenda</option>
+        </select>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
+        <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
+          {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder="Endereço (opcional)" value={address} onChange={(e) => setAddress(e.target.value)} style={inputStyle} />
+        <input placeholder="WhatsApp (opcional)" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} style={inputStyle} />
+        <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} style={inputStyle}>
+          <option value="">Forma de pagamento</option>
+          {PAYMENT_METHODS.map((pm) => <option key={pm} value={pm}>{pm}</option>)}
+        </select>
+      </div>
+      <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Itens ({role === "revenda" ? "preço revenda" : "preço cliente"}):</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8, marginBottom: 10 }}>
+        {products.map((p) => (
+          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, border: "1px solid #D3D1C7", borderRadius: 8, padding: "6px 8px" }}>
+            <span>{p.flavor}</span>
+            <input
+              type="number" min={0}
+              value={qtyByProduct[p.id] || ""}
+              onChange={(e) => setQtyByProduct((q) => ({ ...q, [p.id]: e.target.value }))}
+              style={{ width: 48, padding: 4, borderRadius: 6, border: "1px solid #D3D1C7" }}
+            />
+          </div>
+        ))}
+      </div>
+      <div style={{ fontWeight: 700, marginBottom: 8 }}>Total: {fmtBRL(total)}</div>
+      {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+      {msg && <div style={{ color: "#27500A", fontSize: 12, marginBottom: 8 }}>{msg}</div>}
+      <Btn disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : "Lançar pedido"}</Btn>
+    </Card>
+  );
+}
+
 function BellToggle({ role }) {
   const [enabled, setEnabled] = useState(() => isBellEnabled(role));
   function toggle() {
@@ -1383,6 +1535,7 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 function Adm({ orders, products, stock, resellers, chats, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
+  const [showManualTools, setShowManualTools] = useState(false);
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
   const activeResellers = resellers.filter((r) => r.status === "ativo");
   const totalFaturado = orders.filter((o) => o.status !== STATUS_CANCELLED).reduce((s, o) => s + o.total, 0);
@@ -1460,8 +1613,19 @@ function Adm({ orders, products, stock, resellers, chats, currentEmail, onApprov
                 ["E-mail", "Pedidos", "Total gasto", "Status", "Última compra"],
                 ...clientsList.map((c) => [c.email, c.orders, fmtBRL(c.total), c.resellerStatus, c.lastOrder ? new Date(c.lastOrder).toLocaleString("pt-BR") : ""]),
               ])}>Imprimir PDF</Btn>
+              <Btn variant="ghost" onClick={() => setShowManualTools((v) => !v)}>
+                {showManualTools ? "Fechar" : "+ Cliente / pedido antigo"}
+              </Btn>
             </div>
           </div>
+
+          {showManualTools && (
+            <div>
+              <ManualClienteForm />
+              <ManualOrderForm products={products} />
+            </div>
+          )}
+
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {clientsList.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum cliente encontrado.</div>}
             {clientsList.map((c) => (

@@ -17,6 +17,8 @@ const PIX_CNPJ = "68.400.396/0001-06";
 const PIX_MERCHANT_NAME = "Confeitaria/EVVULD";
 const PIX_MERCHANT_CITY = "Jandira";
 const WHATSAPP_NUMBER = "5511965873079";
+const CART_NUDGE_DELAY_MS = 5 * 60 * 1000;
+const CART_NUDGE_MESSAGE = "Oi! Percebemos que você está há um tempinho com produtos no carrinho, mas ainda não finalizou o pedido. Está tudo bem? Precisando de ajuda, é só chamar aqui no chat que teremos o prazer de te auxiliar! 🧡";
 
 const FLAVOR_COLORS = {
   "Maracujá": "#E8A23D",
@@ -796,6 +798,21 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
       .catch((e) => { console.error("pix qr error", e); if (!cancelled) setPixQrImage(null); });
     return () => { cancelled = true; };
   }, [role, total]);
+
+  // Abandoned-cart nudge: if items sit in the cart for a while with no
+  // checkout, send one automated chat message offering help. Resets once
+  // the cart empties (checkout or cleared), so a later cart can nudge again.
+  const [cartNudged, setCartNudged] = useState(false);
+  useEffect(() => {
+    if (cartItems.length === 0) { setCartNudged(false); return; }
+    if (cartNudged) return;
+    const timer = setTimeout(() => {
+      onSendChatMessage(email, "sistema", null, CART_NUDGE_MESSAGE);
+      setCartNudged(true);
+    }, CART_NUDGE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [cartItems.length, cartNudged, email, onSendChatMessage]);
+
   const myOrders = orders.filter((o) => o.email === email).sort((a, b) => new Date(b.date) - new Date(a.date));
   const pendingConsignment = myOrders.find((o) => o.role === "revenda" && o.paymentType === "consignado" && o.paymentStatus !== "pago");
 

@@ -19,6 +19,16 @@ const FLAVOR_COLORS = {
   "Ninho com Nutella": "#8A5B3F",
   "Brigadeiro": "#3D2419",
 };
+// Fallback is FLAVOR_COLORS (a flat color block) for any flavor without a
+// real product photo yet, e.g. a new one added later via Estoque.
+const FLAVOR_IMAGES = {
+  "Maracujá": "/produtos/maracuja.jpg",
+  "Doce de Leite": "/produtos/doce-de-leite.jpg",
+  "Ninho": "/produtos/ninho.jpg",
+  "Nutella": "/produtos/nutella.jpg",
+  "Ninho com Nutella": "/produtos/ninho-com-nutella.jpg",
+  "Brigadeiro": "/produtos/brigadeiro.jpg",
+};
 
 const DEFAULT_PRODUCTS = Object.keys(FLAVOR_COLORS).map((flavor, i) => ({
   id: "p" + (i + 1),
@@ -594,7 +604,15 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
             {activeProducts.map((p) => (
               <Card key={p.id}>
-                <div style={{ width: "100%", height: 90, borderRadius: 10, background: FLAVOR_COLORS[p.flavor], marginBottom: 10 }} />
+                {FLAVOR_IMAGES[p.flavor] ? (
+                  <img
+                    src={FLAVOR_IMAGES[p.flavor]}
+                    alt={`Brownie ${p.flavor}`}
+                    style={{ width: "100%", height: 90, borderRadius: 10, marginBottom: 10, objectFit: "cover" }}
+                  />
+                ) : (
+                  <div style={{ width: "100%", height: 90, borderRadius: 10, background: FLAVOR_COLORS[p.flavor], marginBottom: 10 }} />
+                )}
                 <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 2 }}>Brownie {p.flavor}</div>
                 <div style={{ fontSize: 13, color: "#8A7A63", marginBottom: 10 }}>70g</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

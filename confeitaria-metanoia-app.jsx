@@ -183,6 +183,27 @@ function speakAlert(text) {
 function announceNewOrder() {
   speakAlert("Oiêee! Novo pedido!");
 }
+// Browsers only allow audio/speech after a real user gesture on the page,
+// so the "new order" bell has to be explicitly turned on by a click —
+// silently trying to speak() on page load would just fail with no sound
+// and no error. The preference is per-browser (localStorage), per role.
+function bellStorageKey(role) {
+  return "metanoia_bell_" + role;
+}
+function isBellEnabled(role) {
+  try {
+    return localStorage.getItem(bellStorageKey(role)) === "1";
+  } catch (e) {
+    return false;
+  }
+}
+function setBellEnabled(role, enabled) {
+  try {
+    localStorage.setItem(bellStorageKey(role), enabled ? "1" : "0");
+  } catch (e) {
+    console.error("bell preference save error", e);
+  }
+}
 
 // Data lives in Firestore under the shared "metanoia" collection (matches
 // the security rule /metanoia/{docId}). Products/resellers/stock are each
@@ -1151,6 +1172,21 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   );
 }
 
+function BellToggle({ role }) {
+  const [enabled, setEnabled] = useState(() => isBellEnabled(role));
+  function toggle() {
+    const next = !enabled;
+    setBellEnabled(role, next);
+    setEnabled(next);
+    if (next) speakAlert("Campainha ativada! Você vai ouvir um aviso a cada novo pedido.");
+  }
+  return (
+    <Btn variant={enabled ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={toggle}>
+      {enabled ? "🔔 Campainha ativada" : "🔕 Ativar campainha"}
+    </Btn>
+  );
+}
+
 // ---------- Fabricante ----------
 function Fabricante({ orders, products, stock, resellers, chats, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
@@ -1166,6 +1202,7 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
           </Btn>
           <Btn variant={tab === "administracao" ? "dark" : "ghost"} onClick={() => setTab("administracao")}>Administração</Btn>
           <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
+          <BellToggle role="fabricante" />
         </div>
         {tab === "pedidos" && (
           <div style={{ display: "flex", gap: 8 }}>
@@ -1385,6 +1422,7 @@ function Adm({ orders, products, stock, resellers, chats, currentEmail, onApprov
         <Btn variant={tab === "produtos" ? "dark" : "ghost"} onClick={() => setTab("produtos")}>Produtos</Btn>
         <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Pedidos</Btn>
         <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
+        <BellToggle role="adm" />
       </div>
 
       {tab === "chat" && (
@@ -1398,7 +1436,7 @@ function Adm({ orders, products, stock, resellers, chats, currentEmail, onApprov
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Revendedores ativos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{activeResellers.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Ingredientes em falta</div><div style={{ fontSize: 22, fontWeight: 700, color: lowStock.length ? "#C4394A" : "#3D2419" }}>{lowStock.length}</div></Card>
           <Card>
-            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso sonoro de novo pedido</div>
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso sonoro de novo pedido (ative a campainha no topo da tela antes)</div>
             <Btn variant="ghost" style={{ width: "100%" }} onClick={onCreateTestOrder}>🔔 Campainha de teste</Btn>
           </Card>
         </div>
@@ -1622,7 +1660,7 @@ export default function App() {
       return;
     }
     const isNew = orders.some((o) => !knownOrderIds.current.has(o.id));
-    if (isNew && (activeRole === "fabricante" || activeRole === "adm")) {
+    if (isNew && (activeRole === "fabricante" || activeRole === "adm") && isBellEnabled(activeRole)) {
       announceNewOrder();
     }
     knownOrderIds.current = new Set(orders.map((o) => o.id));

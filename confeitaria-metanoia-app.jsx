@@ -883,6 +883,16 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
     setCart({}); setAddr(""); setWhats(""); setPaymentProof(null);
   }
 
+  function cancelCart() {
+    if (cartItems.length === 0) return false;
+    if (!confirm("Cancelar esse pedido? Os itens do carrinho serão removidos.")) return false;
+    setCart({});
+    setAddr("");
+    setWhats("");
+    setPaymentProof(null);
+    return true;
+  }
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, gap: 10 }}>
@@ -1013,9 +1023,12 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                         </div>
                       </div>
                     )}
-                    <Btn style={{ marginTop: 12, width: "100%" }} disabled={!cadastro} onClick={checkout}>
-                      {cadastro ? "Finalizar pedido" : "Complete seu cadastro acima"}
-                    </Btn>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <Btn variant="ghost" style={{ flex: 1 }} onClick={cancelCart}>Cancelar pedido</Btn>
+                      <Btn style={{ flex: 2 }} disabled={!cadastro} onClick={checkout}>
+                        {cadastro ? "Finalizar pedido" : "Complete seu cadastro acima"}
+                      </Btn>
+                    </div>
                   </>
                 )}
               </div>
@@ -1105,7 +1118,10 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                 <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setShowCartModal(false)}>Fechar</Btn>
                 {cartItems.length > 0 && (
-                  <Btn style={{ flex: 1 }} onClick={() => { setShowCartModal(false); setTab("loja"); }}>Finalizar pedido</Btn>
+                  <>
+                    <Btn variant="danger" style={{ flex: 1 }} onClick={() => { if (cancelCart()) setShowCartModal(false); }}>Cancelar</Btn>
+                    <Btn style={{ flex: 1 }} onClick={() => { setShowCartModal(false); setTab("loja"); }}>Finalizar</Btn>
+                  </>
                 )}
               </div>
             </Card>

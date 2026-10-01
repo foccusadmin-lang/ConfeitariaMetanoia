@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db, googleProvider } from "./src/firebase.js";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where } from "firebase/firestore";
+import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where, arrayUnion } from "firebase/firestore";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
 const FABRICANTE_EMAIL = "nelcialves016@gmail.com";
@@ -13,6 +13,7 @@ const RESELLER_EXPIRY_DAYS = 30;
 const RESELLER_MIN_ORDER_UNITS = 30;
 const RESELLER_PAYMENT_DAYS = 7;
 const PIX_CNPJ = "68.400.396/0001-06";
+const WHATSAPP_NUMBER = "5511965873079";
 
 const FLAVOR_COLORS = {
   "Maracujá": "#E8A23D",
@@ -135,6 +136,7 @@ function announceNewOrder() {
 const STORAGE_KEYS = ["metanoia_products", "metanoia_resellers", "metanoia_stock"];
 const METANOIA_COLLECTION = "metanoia";
 const ordersQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "order"));
+const chatsQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "chat"));
 
 function docRef(key) {
   return doc(db, METANOIA_COLLECTION, key);
@@ -164,6 +166,13 @@ async function loadAll() {
   } catch (e) {
     console.error("orders read error", e);
     out.metanoia_orders = null;
+  }
+  try {
+    const snap = await getDocs(chatsQueryRef());
+    out.metanoia_chats = snap.docs.map((d) => stripKind(d.data()));
+  } catch (e) {
+    console.error("chats read error", e);
+    out.metanoia_chats = null;
   }
   return out;
 }
@@ -200,6 +209,22 @@ async function saveCliente(email, data) {
     console.error("cliente save error", email, e);
   }
 }
+// One chat thread per client (keyed by their e-mail), visible and
+// answerable at the same time from the fabricante and the adm panel.
+function chatDocRef(email) {
+  return doc(db, METANOIA_COLLECTION, "chat_" + email);
+}
+async function sendChatMessage(clientEmail, from, senderEmail, text) {
+  try {
+    await setDoc(
+      chatDocRef(clientEmail),
+      { kind: "chat", email: clientEmail, messages: arrayUnion({ from, email: senderEmail, text, at: new Date().toISOString() }), updatedAt: new Date().toISOString() },
+      { merge: true }
+    );
+  } catch (e) {
+    console.error("chat send error", clientEmail, e);
+  }
+}
 // Subscribes to live changes on every key; onChange(key, items) fires
 // whenever any viewer (this one included) writes a new value.
 function subscribeAll(onChange) {
@@ -217,6 +242,13 @@ function subscribeAll(onChange) {
       ordersQueryRef(),
       (snap) => onChange("metanoia_orders", snap.docs.map((d) => stripKind(d.data()))),
       (e) => console.error("orders subscribe error", e)
+    )
+  );
+  unsubs.push(
+    onSnapshot(
+      chatsQueryRef(),
+      (snap) => onChange("metanoia_chats", snap.docs.map((d) => stripKind(d.data()))),
+      (e) => console.error("chats subscribe error", e)
     )
   );
   return () => unsubs.forEach((u) => u());
@@ -582,7 +614,111 @@ function SalesReportForm({ order, onSubmit }) {
   );
 }
 
-function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport }) {
+// ---------- Chat ----------
+function ChatThread({ messages, onSend, placeholder }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+
+  async function handleSend() {
+    if (!text.trim() || sending) return;
+    setSending(true);
+    try {
+      await onSend(text.trim());
+      setText("");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 360, overflowY: "auto", marginBottom: 10, padding: 2 }}>
+        {(!messages || messages.length === 0) && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhuma mensagem ainda.</div>}
+        {(messages || []).map((m, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.from === "cliente" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "80%", background: m.from === "cliente" ? "#C4577A" : "#F1EFE8",
+              color: m.from === "cliente" ? "#fff" : "#3D2419",
+              borderRadius: 12, padding: "8px 12px", fontSize: 13, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            }}>
+              {m.text}
+            </div>
+            <div style={{ fontSize: 10, color: "#B4B2A9", marginTop: 2 }}>
+              {m.from !== "cliente" ? `${m.from}${m.email ? " · " + m.email : ""} · ` : ""}{new Date(m.at).toLocaleString("pt-BR")}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleSend(); }}
+          placeholder={placeholder || "Digite sua mensagem…"}
+          style={{ flex: 1, padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }}
+        />
+        <Btn disabled={sending} onClick={handleSend}>Enviar</Btn>
+      </div>
+    </div>
+  );
+}
+
+function ChatPanel({ chats, orders, onSend }) {
+  const [selected, setSelected] = useState(null);
+  const sorted = [...chats].sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  const active = sorted.find((c) => c.email === selected) || sorted[0] || null;
+
+  function clientWhatsapp(clientEmail) {
+    const last = [...orders].filter((o) => o.email === clientEmail).sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+    return last && last.whatsapp ? last.whatsapp.replace(/\D/g, "") : null;
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 14 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {sorted.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhuma conversa ainda.</div>}
+        {sorted.map((c) => {
+          const last = c.messages && c.messages[c.messages.length - 1];
+          const isActive = active && active.email === c.email;
+          return (
+            <button
+              key={c.email}
+              onClick={() => setSelected(c.email)}
+              style={{
+                textAlign: "left", padding: 8, borderRadius: 8, cursor: "pointer",
+                border: "1px solid " + (isActive ? "#C4577A" : "#E4E1D6"),
+                background: isActive ? "#FBEAF0" : "#fff",
+              }}
+            >
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#3D2419" }}>{c.email}</div>
+              <div style={{ fontSize: 11, color: "#8A7A63", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{last ? last.text : ""}</div>
+            </button>
+          );
+        })}
+      </div>
+      <Card>
+        {active ? (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+              <div style={{ fontWeight: 700, color: "#3D2419" }}>{active.email}</div>
+              {clientWhatsapp(active.email) && (
+                <a href={`https://wa.me/55${clientWhatsapp(active.email)}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#27500A", fontWeight: 600 }}>
+                  Abrir WhatsApp do cliente
+                </a>
+              )}
+            </div>
+            <ChatThread messages={active.messages} onSend={(text) => onSend(active.email, text)} />
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "#8A7A63" }}>Selecione uma conversa.</div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport, chats, onSendChatMessage }) {
+  const myChat = chats.find((c) => c.email === email);
   const [cart, setCart] = useState({});
   const [addr, setAddr] = useState("");
   const [whats, setWhats] = useState("");
@@ -665,6 +801,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
         <div style={{ display: "flex", gap: 8 }}>
           <Btn variant={tab === "loja" ? "dark" : "ghost"} onClick={() => setTab("loja")}>Painel</Btn>
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Meus pedidos ({myOrders.length})</Btn>
+          <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
         </div>
       </div>
 
@@ -831,6 +968,17 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
         </div>
       )}
 
+      {tab === "chat" && (
+        <Card>
+          <div style={{ fontWeight: 700, marginBottom: 4, color: "#3D2419" }}>Fale com a gente</div>
+          <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 10 }}>
+            Tire suas dúvidas por aqui ou direto pelo WhatsApp:{" "}
+            <a href={`https://wa.me/${WHATSAPP_NUMBER}`} target="_blank" rel="noreferrer" style={{ color: "#C4577A", fontWeight: 600 }}>(11) 96587-3079</a>
+          </div>
+          <ChatThread messages={myChat && myChat.messages} onSend={(text) => onSendChatMessage(email, "cliente", email, text)} />
+        </Card>
+      )}
+
       {showCartModal && (
         <div
           onClick={() => setShowCartModal(false)}
@@ -873,7 +1021,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 }
 
 // ---------- Fabricante ----------
-function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder }) {
+function Fabricante({ orders, products, stock, resellers, chats, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
@@ -886,6 +1034,7 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
             Estoque{lowStock.length > 0 && ` (${lowStock.length} em falta)`}
           </Btn>
           <Btn variant={tab === "administracao" ? "dark" : "ghost"} onClick={() => setTab("administracao")}>Administração</Btn>
+          <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
         </div>
         {tab === "pedidos" && (
           <div style={{ display: "flex", gap: 8 }}>
@@ -933,6 +1082,10 @@ function Fabricante({ orders, products, stock, resellers, onUpdateStatus, onAppr
           onMarkPaymentReceived={onMarkPaymentReceived}
           onCreateTestOrder={onCreateTestOrder}
         />
+      )}
+
+      {tab === "chat" && (
+        <ChatPanel chats={chats} orders={orders} onSend={(clientEmail, text) => onSendChatMessage(clientEmail, "fabricante", currentEmail, text)} />
       )}
 
       {tab === "pedidos" && (
@@ -1059,7 +1212,7 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
-function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder }) {
+function Adm({ orders, products, stock, resellers, chats, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
@@ -1100,7 +1253,12 @@ function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectRe
         <Btn variant={tab === "revendas" ? "dark" : "ghost"} onClick={() => setTab("revendas")}>Revendas ({pendingResellers.length} pendentes)</Btn>
         <Btn variant={tab === "produtos" ? "dark" : "ghost"} onClick={() => setTab("produtos")}>Produtos</Btn>
         <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Pedidos</Btn>
+        <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
       </div>
+
+      {tab === "chat" && (
+        <ChatPanel chats={chats} orders={orders} onSend={(clientEmail, text) => onSendChatMessage(clientEmail, "adm", currentEmail, text)} />
+      )}
 
       {tab === "visao" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 }}>
@@ -1265,6 +1423,7 @@ export default function App() {
   const [resellers, setResellers] = useState([]);
   const [stock, setStock] = useState(DEFAULT_STOCK);
   const [cadastro, setCadastro] = useState(null);
+  const [chats, setChats] = useState([]);
 
   const email = user ? user.email.toLowerCase() : null;
 
@@ -1289,6 +1448,7 @@ export default function App() {
       if (data.metanoia_products) setProducts(data.metanoia_products);
       else await save("metanoia_products", DEFAULT_PRODUCTS);
       if (data.metanoia_orders) setOrders(data.metanoia_orders);
+      if (data.metanoia_chats) setChats(data.metanoia_chats);
       if (data.metanoia_resellers) setResellers(data.metanoia_resellers);
       if (data.metanoia_stock) setStock(data.metanoia_stock);
       else await save("metanoia_stock", DEFAULT_STOCK);
@@ -1304,6 +1464,7 @@ export default function App() {
     return subscribeAll((key, items) => {
       if (key === "metanoia_products") setProducts(items);
       else if (key === "metanoia_orders") setOrders(items);
+      else if (key === "metanoia_chats") setChats(items);
       else if (key === "metanoia_resellers") setResellers(items);
       else if (key === "metanoia_stock") setStock(items);
     });
@@ -1412,6 +1573,20 @@ export default function App() {
     };
     setOrders([...orders, order]);
     await saveOrder(order);
+  }
+
+  async function handleSendChatMessage(clientEmail, from, senderEmail, text) {
+    const msg = { from, email: senderEmail, text, at: new Date().toISOString() };
+    const idx = chats.findIndex((c) => c.email === clientEmail);
+    let next;
+    if (idx >= 0) {
+      const updated = { ...chats[idx], messages: [...(chats[idx].messages || []), msg], updatedAt: msg.at };
+      next = chats.map((c, i) => (i === idx ? updated : c));
+    } else {
+      next = [...chats, { email: clientEmail, messages: [msg], updatedAt: msg.at }];
+    }
+    setChats(next);
+    await sendChatMessage(clientEmail, from, senderEmail, text);
   }
 
   async function handleMarkPaymentReceived(orderId) {
@@ -1537,6 +1712,8 @@ export default function App() {
           onRequestReseller={handleRequestReseller}
           onConfirmDelivery={handleConfirmDelivery}
           onSubmitSalesReport={handleSubmitSalesReport}
+          chats={chats}
+          onSendChatMessage={handleSendChatMessage}
         />
       )}
 
@@ -1554,6 +1731,9 @@ export default function App() {
           onManualResellerToggle={handleManualResellerToggle}
           onMarkPaymentReceived={handleMarkPaymentReceived}
           onCreateTestOrder={handleCreateTestOrder}
+          chats={chats}
+          currentEmail={email}
+          onSendChatMessage={handleSendChatMessage}
         />
       )}
 
@@ -1575,6 +1755,9 @@ export default function App() {
             onManualResellerToggle={handleManualResellerToggle}
             onMarkPaymentReceived={handleMarkPaymentReceived}
             onCreateTestOrder={handleCreateTestOrder}
+            chats={chats}
+            currentEmail={email}
+            onSendChatMessage={handleSendChatMessage}
           />
         </div>
       )}

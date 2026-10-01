@@ -969,7 +969,7 @@ export default function App() {
     } catch (e) {
       console.error("google sign-in error", e);
       if (e && e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
-        setLoginError("Não foi possível entrar com o Google. Tente novamente.");
+        setLoginError(`Não foi possível entrar com o Google (${e && e.code ? e.code : "erro desconhecido"}). Tente novamente.`);
       }
     } finally {
       setLoggingIn(false);

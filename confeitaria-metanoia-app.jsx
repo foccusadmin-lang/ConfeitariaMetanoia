@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
-import { db } from "./src/firebase.js";
+import { auth, db, googleProvider } from "./src/firebase.js";
+import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where } from "firebase/firestore";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
@@ -348,40 +349,33 @@ function Header({ email, role, photoURL, onLogout }) {
 }
 
 // ---------- Login ----------
-function Login({ onLogin }) {
-  const [email, setEmail] = useState("");
-  const [err, setErr] = useState("");
+function GoogleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 48 48" style={{ flexShrink: 0 }}>
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.5 29.3 35.5 24 35.5c-6.4 0-11.6-5.2-11.6-11.6S17.6 12.3 24 12.3c3 0 5.6 1.1 7.7 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5 13.2 4.5 4.5 13.2 4.5 24S13.2 43.5 24 43.5 43.5 34.8 43.5 24c0-1.2-.1-2.4-.4-3.5z"/>
+      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.8 19 12.3 24 12.3c3 0 5.6 1.1 7.7 2.9l5.7-5.7C33.9 6.5 29.2 4.5 24 4.5c-7.5 0-14 4.2-17.7 10.2z"/>
+      <path fill="#4CAF50" d="M24 43.5c5.1 0 9.7-1.9 13.2-5.1l-6.1-5.2c-2 1.5-4.5 2.3-7.1 2.3-5.3 0-9.7-3.5-11.3-8.3l-6.5 5C9.9 39.1 16.4 43.5 24 43.5z"/>
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.3 5.5l6.1 5.2C40.6 35.9 43.5 30.4 43.5 24c0-1.2-.1-2.4-.4-3.5z"/>
+    </svg>
+  );
+}
+function Login({ onLogin, loggingIn, loginError }) {
   return (
     <div style={{ minHeight: 480, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <Card style={{ width: 340, textAlign: "center" }}>
         <div style={{ fontFamily: "Georgia, serif", fontSize: 30, color: "#3D2419", fontWeight: 700, marginBottom: 2 }}>Metanoia</div>
         <div style={{ fontSize: 13, color: "#8A7A63", marginBottom: 22 }}>Adoçando a vida — brownies artesanais</div>
-        <div style={{ textAlign: "left", marginBottom: 6, fontSize: 13, color: "#5F5E5A" }}>E-mail (Google, Hotmail ou iCloud)</div>
-        <input
-          type="email"
-          value={email}
-          placeholder="seuemail@exemplo.com"
-          onChange={(e) => { setEmail(e.target.value); setErr(""); }}
-          style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #D3D1C7", fontSize: 14, marginBottom: 10, boxSizing: "border-box" }}
-        />
-        {email.includes("@") && (
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 10 }}>
-            <Avatar email={email} size={40} />
-          </div>
-        )}
-        {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+        {loginError && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 12 }}>{loginError}</div>}
         <Btn
-          style={{ width: "100%" }}
-          onClick={() => {
-            const v = email.trim().toLowerCase();
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { setErr("Digite um e-mail válido."); return; }
-            onLogin(v);
-          }}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}
+          disabled={loggingIn}
+          onClick={onLogin}
         >
-          Entrar
+          <GoogleIcon />
+          {loggingIn ? "Entrando…" : "Entrar com o Google"}
         </Btn>
         <div style={{ fontSize: 11, color: "#B4B2A9", marginTop: 14 }}>
-          Protótipo: login simulado por e-mail (sem senha). Os e-mails de fabricante, estoque e adm abrem seus painéis automaticamente.
+          Login com sua conta Google de verdade. As contas de fabricante, estoque e adm abrem seus painéis automaticamente ao entrar.
         </div>
       </Card>
     </div>
@@ -911,15 +905,35 @@ function Adm({ orders, products, stock, resellers, onApproveReseller, onRejectRe
 }
 
 export default function App() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [user, setUser] = useState(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [email, setEmail] = useState(null);
   const [activeRole, setActiveRole] = useState(null);
   const [products, setProducts] = useState(DEFAULT_PRODUCTS);
   const [orders, setOrders] = useState([]);
   const [resellers, setResellers] = useState([]);
   const [stock, setStock] = useState(DEFAULT_STOCK);
 
+  const email = user ? user.email.toLowerCase() : null;
+
+  // Real Google sign-in via Firebase Auth. Role is still decided purely by
+  // which Google account's e-mail logged in — fabricante/estoque/adm are
+  // just the three accounts that automatically land on their own panel.
   useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthChecked(true);
+      if (!u) { setActiveRole(null); return; }
+      const v = u.email.toLowerCase();
+      setActiveRole(v === ADMIN_EMAIL ? "adm" : v === FABRICANTE_EMAIL ? "fabricante" : v === ESTOQUE_EMAIL ? "estoque" : "cliente");
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    if (!email) return;
     (async () => {
       const data = await loadAll();
       if (data.metanoia_products) setProducts(data.metanoia_products);
@@ -930,28 +944,41 @@ export default function App() {
       else await save("metanoia_stock", DEFAULT_STOCK);
       setLoading(false);
     })();
-  }, []);
+  }, [email]);
 
   // Live sync: reflect what any other viewer (fabricante, admin, another
   // client) writes, so a new order/status/stock change shows up here
   // without a reload.
   useEffect(() => {
+    if (!email) return;
     return subscribeAll((key, items) => {
       if (key === "metanoia_products") setProducts(items);
       else if (key === "metanoia_orders") setOrders(items);
       else if (key === "metanoia_resellers") setResellers(items);
       else if (key === "metanoia_stock") setStock(items);
     });
-  }, []);
+  }, [email]);
 
   const myResellerInfo = useMemo(() => resellers.find((r) => r.email === email), [resellers, email]);
 
-  function handleLogin(v) {
-    setEmail(v);
-    if (v === ADMIN_EMAIL) setActiveRole("adm");
-    else if (v === FABRICANTE_EMAIL) setActiveRole("fabricante");
-    else if (v === ESTOQUE_EMAIL) setActiveRole("estoque");
-    else setActiveRole("cliente");
+  async function handleLogin() {
+    setLoginError("");
+    setLoggingIn(true);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.error("google sign-in error", e);
+      if (e && e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
+        setLoginError("Não foi possível entrar com o Google. Tente novamente.");
+      }
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  async function handleLogout() {
+    await signOut(auth);
+    setLoading(true);
   }
 
   async function handlePlaceOrder(order) {
@@ -1058,23 +1085,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resellers.length]);
 
-  if (loading) {
+  if (!authChecked) {
     return <div style={{ minHeight: 400, display: "flex", alignItems: "center", justifyContent: "center", color: "#8A7A63" }}>Carregando…</div>;
   }
 
-  if (!email) {
+  if (!user) {
     return (
       <div style={{ fontFamily: "system-ui, sans-serif", background: "#FAF6EF", padding: 24, borderRadius: 16 }}>
-        <Login onLogin={handleLogin} />
+        <Login onLogin={handleLogin} loggingIn={loggingIn} loginError={loginError} />
       </div>
     );
+  }
+
+  if (loading) {
+    return <div style={{ minHeight: 400, display: "flex", alignItems: "center", justifyContent: "center", color: "#8A7A63" }}>Carregando…</div>;
   }
 
   const canSwitchToRevenda = myResellerInfo && myResellerInfo.status === "ativo";
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", background: "#FAF6EF", padding: 24, borderRadius: 16, minHeight: 500 }}>
-      <Header email={email} role={activeRole} photoURL={null} onLogout={() => { setEmail(null); setActiveRole(null); }} />
+      <Header email={email} role={activeRole} photoURL={user.photoURL} onLogout={handleLogout} />
 
       {(activeRole === "cliente" || activeRole === "revenda") && canSwitchToRevenda && email !== ADMIN_EMAIL && email !== FABRICANTE_EMAIL && email !== ESTOQUE_EMAIL && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>

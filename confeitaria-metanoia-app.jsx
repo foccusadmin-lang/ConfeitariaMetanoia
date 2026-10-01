@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db, googleProvider } from "./src/firebase.js";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where, arrayUnion } from "firebase/firestore";
+import QRCode from "qrcode";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
 const FABRICANTE_EMAIL = "nelcialves016@gmail.com";
@@ -13,6 +14,8 @@ const RESELLER_EXPIRY_DAYS = 30;
 const RESELLER_MIN_ORDER_UNITS = 30;
 const RESELLER_PAYMENT_DAYS = 7;
 const PIX_CNPJ = "68.400.396/0001-06";
+const PIX_MERCHANT_NAME = "Confeitaria/EVVULD";
+const PIX_MERCHANT_CITY = "Jandira";
 const WHATSAPP_NUMBER = "5511965873079";
 
 const FLAVOR_COLORS = {
@@ -95,6 +98,57 @@ function fileToCompressedDataURL(file, maxW = 480, quality = 0.6) {
 }
 function daysAgo(dateStr) {
   return (Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24);
+}
+
+// ---------- Pix BR Code (EMV QR) ----------
+// Builds the standard "copia e cola" string the Central Bank defines for
+// Pix QR codes, so any banking app can scan or paste it. The amount is
+// optional (omit for a reusable, amount-free QR); the key itself (not
+// this payload) is what actually routes the payment.
+function pixTlv(id, value) {
+  return id + String(value.length).padStart(2, "0") + value;
+}
+function pixCrc16(payload) {
+  let crc = 0xffff;
+  for (let i = 0; i < payload.length; i++) {
+    crc ^= payload.charCodeAt(i) << 8;
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
+}
+function pixSanitize(s, maxLen) {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^\x20-\x7E]/g, "").slice(0, maxLen);
+}
+function buildPixPayload({ key, merchantName, merchantCity, amount, txid, description }) {
+  const merchantInfo =
+    pixTlv("00", "br.gov.bcb.pix") +
+    pixTlv("01", key) +
+    (description ? pixTlv("02", pixSanitize(description, 40)) : "");
+  let payload =
+    pixTlv("00", "01") +
+    pixTlv("01", "12") +
+    pixTlv("26", merchantInfo) +
+    pixTlv("52", "0000") +
+    pixTlv("53", "986") +
+    (amount > 0 ? pixTlv("54", amount.toFixed(2)) : "") +
+    pixTlv("58", "BR") +
+    pixTlv("59", pixSanitize(merchantName, 25)) +
+    pixTlv("60", pixSanitize(merchantCity, 15)) +
+    pixTlv("62", pixTlv("05", (txid || "***").replace(/[^A-Za-z0-9]/g, "").slice(0, 25) || "***"));
+  payload += "6304";
+  return payload + pixCrc16(payload);
+}
+function buildPixCode(amount, txid) {
+  return buildPixPayload({
+    key: PIX_CNPJ.replace(/\D/g, ""),
+    merchantName: PIX_MERCHANT_NAME,
+    merchantCity: PIX_MERCHANT_CITY,
+    amount,
+    txid,
+    description: "Doceria Metanoia",
+  });
 }
 async function shareApp() {
   const shareData = {
@@ -726,12 +780,22 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [uploadingProof, setUploadingProof] = useState(false);
   const [tab, setTab] = useState("loja");
   const [showCartModal, setShowCartModal] = useState(false);
+  const [pixQrImage, setPixQrImage] = useState(null);
 
   const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
   const cartItems = Object.entries(cart).filter(([, q]) => q > 0);
   const total = cartItems.reduce((s, [, q]) => s + q * price, 0);
   const totalUnits = cartItems.reduce((s, [, q]) => s + q, 0);
+
+  useEffect(() => {
+    if (role !== "cliente" || total <= 0) { setPixQrImage(null); return; }
+    let cancelled = false;
+    QRCode.toDataURL(buildPixCode(total), { width: 220, margin: 1 })
+      .then((url) => { if (!cancelled) setPixQrImage(url); })
+      .catch((e) => { console.error("pix qr error", e); if (!cancelled) setPixQrImage(null); });
+    return () => { cancelled = true; };
+  }, [role, total]);
   const myOrders = orders.filter((o) => o.email === email).sort((a, b) => new Date(b.date) - new Date(a.date));
   const pendingConsignment = myOrders.find((o) => o.role === "revenda" && o.paymentType === "consignado" && o.paymentStatus !== "pago");
 
@@ -753,8 +817,9 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   }
 
   function copyPixKey() {
-    navigator.clipboard?.writeText(PIX_CNPJ).then(
-      () => alert("Chave Pix copiada!"),
+    const code = total > 0 ? buildPixCode(total) : PIX_CNPJ;
+    navigator.clipboard?.writeText(code).then(
+      () => alert(total > 0 ? "Código Pix copiado! Cole no app do seu banco (\"Pix Copia e Cola\")." : "Chave Pix copiada!"),
       () => {}
     );
   }
@@ -895,7 +960,14 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                       <div style={{ marginTop: 12, padding: 10, borderRadius: 8, border: "1px solid #D3D1C7" }}>
                         <div style={{ fontWeight: 700, fontSize: 13, color: "#3D2419", marginBottom: 4 }}>Pagamento via Pix</div>
                         <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Chave Pix (CNPJ): <strong>{PIX_CNPJ}</strong></div>
-                        <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={copyPixKey}>Copiar chave Pix</Btn>
+                        {pixQrImage && (
+                          <div style={{ display: "flex", justifyContent: "center", marginBottom: 10 }}>
+                            <img src={pixQrImage} alt="QR Code Pix" style={{ width: 160, height: 160, borderRadius: 8, border: "1px solid #E4E1D6" }} />
+                          </div>
+                        )}
+                        <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={copyPixKey}>
+                          {total > 0 ? "Copiar código Pix (copia e cola)" : "Copiar chave Pix"}
+                        </Btn>
                         <div style={{ marginTop: 10 }}>
                           <label>
                             <input

@@ -25,7 +25,7 @@ const PIX_CNPJ = "68.400.396/0001-06";
 const PIX_MERCHANT_NAME = "Confeitaria/EVVULD";
 const PIX_MERCHANT_CITY = "Jandira";
 const WHATSAPP_NUMBER = "5511965873079";
-const CART_NUDGE_DELAY_MS = 20 * 1000; // TEMP: 20s for testing — change back to 5 * 60 * 1000
+const CART_NUDGE_DELAY_MS = 5 * 60 * 1000;
 const CART_NUDGE_MESSAGE = "Oi! Percebemos que você está há um tempinho com produtos no carrinho, mas ainda não finalizou o pedido. Está tudo bem? Precisando de ajuda, é só chamar aqui no chat que teremos o prazer de te auxiliar! 🧡";
 
 const FLAVOR_COLORS = {

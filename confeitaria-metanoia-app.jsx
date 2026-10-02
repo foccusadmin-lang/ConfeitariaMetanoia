@@ -18,6 +18,7 @@ const CINTA_ART_FIRST_FEE = 50;
 const CINTA_ART_EXTRA_FEE = 35;
 const CINTA_PRINT_UNIT = 0.38;
 const CINTA_SIZE_LABEL = "200x40mm";
+const INVEST_URL = "https://www.foccusinvest.com.br/registrar?ref=ABYGS-EVVULD";
 const CINTA_MAX_FILE_BYTES = 700 * 1024; // base64 must fit in one Firestore doc (1MiB)
 const RESELLER_PAYMENT_DAYS = 7;
 const PIX_CNPJ = "68.400.396/0001-06";
@@ -1151,6 +1152,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [uploadingProof, setUploadingProof] = useState(false);
   const [tab, setTab] = useState("loja");
   const [showCartModal, setShowCartModal] = useState(false);
+  const [showInvestModal, setShowInvestModal] = useState(false);
   const [pixQrImage, setPixQrImage] = useState(null);
   const [orderType, setOrderType] = useState("novo"); // "novo" | "reposicao" (revenda only)
 
@@ -1301,11 +1303,12 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, gap: 10 }}>
         <CartIcon count={cartItems.reduce((s, [, q]) => s + q, 0)} onClick={() => setShowCartModal(true)} />
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <Btn variant={tab === "loja" ? "dark" : "ghost"} onClick={() => setTab("loja")}>Painel</Btn>
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Meus pedidos ({myOrders.length})</Btn>
           {role === "revenda" && <Btn variant={tab === "cinta" ? "dark" : "ghost"} onClick={() => setTab("cinta")}>Cinta personalizada</Btn>}
           <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
+          <Btn variant="primary" onClick={() => setShowInvestModal(true)}>💚 Seja um investidor</Btn>
         </div>
       </div>
 
@@ -1567,6 +1570,53 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                     <Btn style={{ flex: 1 }} onClick={() => { setShowCartModal(false); setTab("loja"); }}>Finalizar</Btn>
                   </>
                 )}
+              </div>
+            </Card>
+          </div>
+        </div>
+      )}
+
+      {showInvestModal && (
+        <div
+          onClick={() => setShowInvestModal(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(61,36,25,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 440, maxHeight: "92vh", overflowY: "auto" }}>
+            <Card>
+              <div style={{ fontSize: 32, textAlign: "center", marginBottom: 4 }}>💚</div>
+              <div style={{ fontFamily: "Georgia, serif", fontWeight: 700, fontSize: 20, color: "#3D2419", textAlign: "center", marginBottom: 10 }}>
+                Seja um investidor com propósito
+              </div>
+              <div style={{ fontSize: 14, color: "#5F5E5A", lineHeight: 1.55, marginBottom: 12 }}>
+                Seu dinheiro pode fazer muito mais do que render. Investindo pela nossa parceria, você faz o seu capital trabalhar por você e, ao mesmo tempo, ajuda o projeto social da <strong>Associação EVVULD</strong> e as <strong>missões no Nordeste e em outros países</strong>.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+                {[
+                  ["📈", "Faça seu capital render", "Invista com uma plataforma pensada para unir resultado financeiro e propósito."],
+                  ["🤝", "Transforme vidas", "Seu investimento apoia o projeto social da Associação EVVULD."],
+                  ["🌍", "Leve esperança mais longe", "Contribua com missões no Nordeste e em outros países."],
+                ].map(([icon, title, text]) => (
+                  <div key={title} style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "#FAF6EF", borderRadius: 10, padding: "8px 10px" }}>
+                    <span style={{ fontSize: 20 }}>{icon}</span>
+                    <div style={{ fontSize: 13, color: "#3D2419" }}><strong>{title}</strong><br /><span style={{ color: "#5F5E5A" }}>{text}</span></div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 14, color: "#72243E", fontStyle: "italic", textAlign: "center", lineHeight: 1.5, marginBottom: 14 }}>
+                Quem semeia com generosidade colhe frutos que vão além do que os olhos veem. Venha fazer parte dessa história!
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                <Btn variant="ghost" style={{ flex: 1 }} onClick={() => setShowInvestModal(false)}>Fechar</Btn>
+                <a
+                  href={INVEST_URL} target="_blank" rel="noopener noreferrer"
+                  onClick={() => setShowInvestModal(false)}
+                  style={{ flex: 2, textAlign: "center", textDecoration: "none", background: "#C4577A", color: "#fff", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 600 }}
+                >
+                  Comece a investir
+                </a>
+              </div>
+              <div style={{ fontSize: 11, color: "#8A7A63", textAlign: "center", lineHeight: 1.4 }}>
+                Você será direcionado ao site da Foccus Invest. Todo investimento envolve riscos e a rentabilidade não é garantida: avalie o seu perfil e leia as informações da plataforma antes de investir.
               </div>
             </Card>
           </div>

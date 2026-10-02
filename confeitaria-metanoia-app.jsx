@@ -12,6 +12,13 @@ const PRICE_CLIENTE = 12.0;
 const RESELLER_THRESHOLD = 30;
 const RESELLER_EXPIRY_DAYS = 30;
 const RESELLER_MIN_ORDER_UNITS = 30;
+// Custom brownie band ("cinta") service for resellers. The print price per
+// band is only an example value from the owner — change it here.
+const CINTA_ART_FIRST_FEE = 50;
+const CINTA_ART_EXTRA_FEE = 35;
+const CINTA_PRINT_UNIT = 0.38;
+const CINTA_SIZE_LABEL = "200x40mm";
+const CINTA_MAX_FILE_BYTES = 700 * 1024; // base64 must fit in one Firestore doc (1MiB)
 const RESELLER_PAYMENT_DAYS = 7;
 const PIX_CNPJ = "68.400.396/0001-06";
 const PIX_MERCHANT_NAME = "Confeitaria/EVVULD";
@@ -77,6 +84,30 @@ function fmtBRL(v) {
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+}
+// An order line is "<productId>" for a standard brownie or
+// "<productId>#c" for one with the reseller's custom band (+ print fee).
+function parseLineKey(key) {
+  const custom = key.endsWith("#c");
+  return { productId: custom ? key.slice(0, -2) : key, custom };
+}
+function itemLabel(it) {
+  return `${it.qty}x ${it.flavor}${it.customBand ? " (cinta personalizada)" : ""}`;
+}
+// What one custom-band art costs to develop: the first design is
+// CINTA_ART_FIRST_FEE, every other flavor of the same art is
+// CINTA_ART_EXTRA_FEE. Reseller-supplied files cost nothing to develop.
+function cintaCreationFees(existingArts, count) {
+  const baseExists = existingArts.some((a) => a.status !== "recusada");
+  return Array.from({ length: count }, (_, i) => (!baseExists && i === 0 ? CINTA_ART_FIRST_FEE : CINTA_ART_EXTRA_FEE));
+}
 function fileToCompressedDataURL(file, maxW = 480, quality = 0.6) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -90,6 +121,8 @@ function fileToCompressedDataURL(file, maxW = 480, quality = 0.6) {
         canvas.width = img.width * scale;
         canvas.height = img.height * scale;
         const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff"; // transparent PNGs would otherwise turn black in JPEG
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
@@ -223,6 +256,7 @@ const STORAGE_KEYS = ["metanoia_products", "metanoia_resellers", "metanoia_stock
 const METANOIA_COLLECTION = "metanoia";
 const ordersQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "order"));
 const chatsQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "chat"));
+const cintaArtsQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "cintaart"));
 
 function docRef(key) {
   return doc(db, METANOIA_COLLECTION, key);
@@ -260,6 +294,13 @@ async function loadAll() {
     console.error("chats read error", e);
     out.metanoia_chats = null;
   }
+  try {
+    const snap = await getDocs(cintaArtsQueryRef());
+    out.metanoia_cintaarts = snap.docs.map((d) => stripKind(d.data()));
+  } catch (e) {
+    console.error("cinta arts read error", e);
+    out.metanoia_cintaarts = null;
+  }
   return out;
 }
 async function save(key, value) {
@@ -294,6 +335,41 @@ async function saveCliente(email, data) {
   } catch (e) {
     console.error("cliente save error", email, e);
   }
+}
+// Custom-band art requests: one small doc per art (cintaart_<id>) so staff
+// can update status without rewriting a list, and each uploaded file (a
+// logo or the reseller's own PDF/CDR) in its own doc (cintafile_<id>) so
+// its base64 never counts against the art doc's 1MB limit.
+function cintaArtDocRef(id) {
+  return doc(db, METANOIA_COLLECTION, "cintaart_" + id);
+}
+function cintaFileDocRef(id) {
+  return doc(db, METANOIA_COLLECTION, "cintafile_" + id);
+}
+async function saveCintaArt(art) {
+  await setDoc(cintaArtDocRef(art.id), { kind: "cintaart", ...art, updatedAt: new Date().toISOString() });
+}
+async function deleteCintaArt(art) {
+  try {
+    await deleteDoc(cintaArtDocRef(art.id));
+    for (const fid of [art.fileId, art.logoFileId]) {
+      if (fid) await deleteDoc(cintaFileDocRef(fid));
+    }
+  } catch (e) {
+    console.error("cinta art delete error", art.id, e);
+  }
+}
+async function saveCintaFile(id, email, fileName, data) {
+  await setDoc(cintaFileDocRef(id), { kind: "cintafile", email, fileName, data, createdAt: new Date().toISOString() });
+}
+async function downloadCintaFile(fileId, fallbackName) {
+  const snap = await getDoc(cintaFileDocRef(fileId));
+  if (!snap.exists()) { alert("Arquivo não encontrado."); return; }
+  const { data, fileName } = snap.data();
+  const a = document.createElement("a");
+  a.href = data;
+  a.download = fileName || fallbackName || "arquivo";
+  a.click();
 }
 // One chat thread per client (keyed by their e-mail), visible and
 // answerable at the same time from the fabricante and the adm panel.
@@ -335,6 +411,13 @@ function subscribeAll(onChange) {
       chatsQueryRef(),
       (snap) => onChange("metanoia_chats", snap.docs.map((d) => stripKind(d.data()))),
       (e) => console.error("chats subscribe error", e)
+    )
+  );
+  unsubs.push(
+    onSnapshot(
+      cintaArtsQueryRef(),
+      (snap) => onChange("metanoia_cintaarts", snap.docs.map((d) => stripKind(d.data()))),
+      (e) => console.error("cinta arts subscribe error", e)
     )
   );
   return () => unsubs.forEach((u) => u());
@@ -659,21 +742,24 @@ function CadastroForm({ onSave }) {
 }
 
 function SalesReportForm({ order, onSubmit }) {
-  const [vendidos, setVendidos] = useState(() => Object.fromEntries(order.items.map((it) => [it.productId, 0])));
+  // A standard line and a custom-band line of the same flavor share a
+  // productId, so lines are keyed by lineKey (falling back for old orders).
+  const keyOf = (it) => it.lineKey || it.productId;
+  const [vendidos, setVendidos] = useState(() => Object.fromEntries(order.items.map((it) => [keyOf(it), 0])));
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function handleSubmit() {
     for (const it of order.items) {
-      const v = Number(vendidos[it.productId]);
+      const v = Number(vendidos[keyOf(it)]);
       if (!Number.isFinite(v) || v < 0 || v > it.qty) { setErr(`Quantidade vendida de ${it.flavor} deve ser entre 0 e ${it.qty}.`); return; }
     }
     setErr("");
     setSaving(true);
     try {
       await onSubmit(order.id, order.items.map((it) => {
-        const v = Number(vendidos[it.productId]) || 0;
-        return { productId: it.productId, flavor: it.flavor, vendidos: v, restantes: it.qty - v };
+        const v = Number(vendidos[keyOf(it)]) || 0;
+        return { productId: it.productId, lineKey: keyOf(it), flavor: it.flavor, customBand: !!it.customBand, vendidos: v, restantes: it.qty - v };
       }));
     } finally {
       setSaving(false);
@@ -684,12 +770,12 @@ function SalesReportForm({ order, onSubmit }) {
     <div style={{ marginTop: 10, borderTop: "1px solid #E4E1D6", paddingTop: 10 }}>
       <div style={{ fontSize: 12, fontWeight: 700, color: "#3D2419", marginBottom: 6 }}>Informe as vendas desse pedido</div>
       {order.items.map((it) => (
-        <div key={it.productId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 4 }}>
-          <span>{it.flavor} ({it.qty} un.)</span>
+        <div key={keyOf(it)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 4 }}>
+          <span>{it.flavor}{it.customBand ? " (cinta personalizada)" : ""} ({it.qty} un.)</span>
           <input
             type="number" min={0} max={it.qty}
-            value={vendidos[it.productId]}
-            onChange={(e) => setVendidos((v) => ({ ...v, [it.productId]: e.target.value }))}
+            value={vendidos[keyOf(it)]}
+            onChange={(e) => setVendidos((v) => ({ ...v, [keyOf(it)]: e.target.value }))}
             style={{ width: 64, padding: 6, borderRadius: 6, border: "1px solid #D3D1C7" }}
           />
         </div>
@@ -803,7 +889,260 @@ function ChatPanel({ chats, orders, onSend }) {
   );
 }
 
-function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport, chats, onSendChatMessage }) {
+// ---------- Cinta personalizada (revenda) ----------
+const CINTA_STATUS = {
+  solicitada: { label: "aguardando criação da arte", tone: "gold" },
+  em_analise: { label: "arte em análise", tone: "gold" },
+  pronta: { label: "arte pronta", tone: "green" },
+  recusada: { label: "arte recusada", tone: "red" },
+};
+function CintaArtInfo({ art }) {
+  const st = CINTA_STATUS[art.status] || { label: art.status, tone: "gray" };
+  return (
+    <div style={{ fontSize: 12, color: "#8A7A63" }}>
+      <Badge tone={st.tone}>{st.label}</Badge>{" "}
+      {art.source === "criada" ? "Criada pela nossa equipe" : "Arte própria enviada"}
+      {art.fee > 0 && <> · Desenvolvimento: {fmtBRL(art.fee)} ({art.feePaid ? "pago" : "pagamento pendente"})</>}
+      {art.designerNote && <div style={{ marginTop: 2 }}>Recado da equipe: {art.designerNote}</div>}
+    </div>
+  );
+}
+
+function CintaPanel({ email, products, arts }) {
+  const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
+  const myArts = arts.filter((a) => a.email === email).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const taken = new Set(myArts.filter((a) => a.status !== "recusada").map((a) => a.flavor));
+  const available = products.filter((p) => p.active && !taken.has(p.flavor));
+
+  const [mode, setMode] = useState("criar");
+  const [brand, setBrand] = useState("");
+  const [notes, setNotes] = useState("");
+  const [logo, setLogo] = useState(null);
+  const [picked, setPicked] = useState({});
+  const [ownFlavor, setOwnFlavor] = useState("");
+  const [ownFile, setOwnFile] = useState(null);
+  const [sizeOk, setSizeOk] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const pickedFlavors = available.filter((p) => picked[p.id]).map((p) => p.flavor);
+  const fees = cintaCreationFees(myArts, pickedFlavors.length);
+  const totalFee = fees.reduce((s, f) => s + f, 0);
+
+  async function submitCreate() {
+    if (!brand.trim()) { setErr("Informe o nome da sua marca."); setMsg(""); return; }
+    if (pickedFlavors.length === 0) { setErr("Escolha ao menos um sabor."); setMsg(""); return; }
+    setErr(""); setMsg(""); setSaving(true);
+    try {
+      const now = new Date().toISOString();
+      for (let i = 0; i < pickedFlavors.length; i++) {
+        let logoFileId = null;
+        if (logo) {
+          logoFileId = uid();
+          await saveCintaFile(logoFileId, email, `logo-${pickedFlavors[i]}.jpg`, logo);
+        }
+        await saveCintaArt({
+          id: uid(), email, flavor: pickedFlavors[i], source: "criada", status: "solicitada",
+          fee: fees[i], feePaid: false, brand: brand.trim(), notes: notes.trim(), logoFileId, createdAt: now,
+        });
+      }
+      setMsg("Pedido de criação enviado! Nossa equipe vai desenvolver a arte e avisar quando estiver pronta.");
+      setBrand(""); setNotes(""); setLogo(null); setPicked({});
+    } catch (e) {
+      console.error("cinta create error", e);
+      setErr("Não foi possível enviar o pedido. Tente novamente.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitOwn() {
+    if (!ownFlavor) { setErr("Escolha o sabor dessa arte."); setMsg(""); return; }
+    if (!ownFile) { setErr("Selecione o arquivo da arte."); setMsg(""); return; }
+    const lower = ownFile.name.toLowerCase();
+    if (!lower.endsWith(".pdf") && !lower.endsWith(".cdr")) { setErr("Envie o arquivo em PDF ou CDR."); setMsg(""); return; }
+    if (ownFile.size > CINTA_MAX_FILE_BYTES) {
+      setErr(`Arquivo muito grande (máx. ${Math.round(CINTA_MAX_FILE_BYTES / 1024)} KB). Reduza o arquivo ou envie pelo chat/WhatsApp.`); setMsg(""); return;
+    }
+    if (!sizeOk) { setErr(`Confirme que o arquivo está na medida de ${CINTA_SIZE_LABEL}.`); setMsg(""); return; }
+    setErr(""); setMsg(""); setSaving(true);
+    try {
+      const fileId = uid();
+      await saveCintaFile(fileId, email, ownFile.name, await readFileAsDataURL(ownFile));
+      await saveCintaArt({
+        id: uid(), email, flavor: ownFlavor, source: "enviada", status: "em_analise",
+        fee: 0, feePaid: false, fileId, fileName: ownFile.name, createdAt: new Date().toISOString(),
+      });
+      setMsg("Arte enviada! Nossa equipe vai analisar e te avisar se está tudo certo.");
+      setOwnFlavor(""); setOwnFile(null); setSizeOk(false);
+    } catch (e) {
+      console.error("cinta upload error", e);
+      setErr("Não foi possível enviar o arquivo. Tente novamente.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <Card>
+        <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 6 }}>Quero a minha cinta personalizada</div>
+        <div style={{ fontSize: 13, color: "#5F5E5A", lineHeight: 1.5 }}>
+          Seus brownies com a cinta da sua marca.
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            <li>Criação da arte: {fmtBRL(CINTA_ART_FIRST_FEE)} (primeiro sabor).</li>
+            <li>Mesma arte com o nome de outro sabor: {fmtBRL(CINTA_ART_EXTRA_FEE)} cada, só pelo desenvolvimento.</li>
+            <li>Com a arte pronta, você paga só {fmtBRL(CINTA_PRINT_UNIT)} por cinta impressa, somado ao valor de cada brownie — sem pagar o desenvolvimento de novo.</li>
+            <li>Já tem a sua arte em boa resolução? Envie em PDF ou CDR ({CINTA_SIZE_LABEL}) para a nossa equipe analisar: sem custo de criação, só os {fmtBRL(CINTA_PRINT_UNIT)} por cinta.</li>
+          </ul>
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+          <Btn variant={mode === "criar" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setMode("criar"); setErr(""); setMsg(""); }}>Quero que criem a arte</Btn>
+          <Btn variant={mode === "enviar" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { setMode("enviar"); setErr(""); setMsg(""); }}>Já tenho a arte</Btn>
+        </div>
+
+        {available.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#8A7A63" }}>Todos os sabores já têm uma arte solicitada ou pronta.</div>
+        ) : mode === "criar" ? (
+          <div>
+            <input placeholder="Nome da sua marca" value={brand} onChange={(e) => setBrand(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }} />
+            <textarea
+              placeholder="Cores, estilo, frases, referências… (opcional)"
+              value={notes} onChange={(e) => setNotes(e.target.value)} rows={3}
+              style={{ ...inputStyle, marginBottom: 8, fontFamily: "inherit", resize: "vertical" }}
+            />
+            <label style={{ display: "inline-block", marginBottom: 10 }}>
+              <input
+                type="file" accept="image/*" style={{ display: "none" }}
+                onChange={async (e) => { const f = e.target.files && e.target.files[0]; if (f) setLogo(await fileToCompressedDataURL(f, 800, 0.8)); }}
+              />
+              <span><Btn variant="ghost" style={{ padding: "6px 14px", fontSize: 12 }}>{logo ? "Trocar logo" : "📎 Enviar o logo da marca (opcional)"}</Btn></span>
+            </label>
+            {logo && <img src={logo} alt="Logo" style={{ display: "block", height: 48, marginBottom: 10, borderRadius: 6, border: "1px solid #E4E1D6" }} />}
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Sabores que terão a cinta:</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+              {available.map((p) => (
+                <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, border: "1px solid #D3D1C7", borderRadius: 8, padding: "6px 10px", cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!picked[p.id]} onChange={(e) => setPicked((s) => ({ ...s, [p.id]: e.target.checked }))} />
+                  {p.flavor}
+                </label>
+              ))}
+            </div>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>
+              Valor do desenvolvimento: {fmtBRL(totalFee)}
+              {pickedFlavors.length > 1 && <span style={{ fontWeight: 400, fontSize: 12, color: "#8A7A63" }}> ({fees.map((f) => fmtBRL(f)).join(" + ")})</span>}
+            </div>
+          </div>
+        ) : (
+          <div>
+            <select value={ownFlavor} onChange={(e) => setOwnFlavor(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }}>
+              <option value="">Sabor dessa arte</option>
+              {available.map((p) => <option key={p.id} value={p.flavor}>{p.flavor}</option>)}
+            </select>
+            <label style={{ display: "inline-block", marginBottom: 8 }}>
+              <input type="file" accept=".pdf,.cdr" style={{ display: "none" }} onChange={(e) => setOwnFile(e.target.files && e.target.files[0])} />
+              <span><Btn variant="ghost" style={{ padding: "6px 14px", fontSize: 12 }}>{ownFile ? `📎 ${ownFile.name}` : "📎 Escolher arquivo PDF ou CDR"}</Btn></span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, marginBottom: 10 }}>
+              <input type="checkbox" checked={sizeOk} onChange={(e) => setSizeOk(e.target.checked)} />
+              Confirmo que o arquivo está na medida de {CINTA_SIZE_LABEL}
+            </label>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Sem custo de criação — só {fmtBRL(CINTA_PRINT_UNIT)} por cinta impressa.</div>
+          </div>
+        )}
+
+        {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+        {msg && <div style={{ color: "#27500A", fontSize: 12, marginBottom: 8 }}>{msg}</div>}
+        {available.length > 0 && (
+          <Btn disabled={saving} onClick={mode === "criar" ? submitCreate : submitOwn}>
+            {saving ? "Enviando…" : mode === "criar" ? "Solicitar criação da arte" : "Enviar arte para análise"}
+          </Btn>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 8 }}>Minhas artes</div>
+        {myArts.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Você ainda não solicitou nenhuma arte.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {myArts.map((a) => (
+            <div key={a.id}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>Brownie {a.flavor}</div>
+              <CintaArtInfo art={a} />
+            </div>
+          ))}
+        </div>
+        {myArts.some((a) => a.status === "pronta") && (
+          <div style={{ fontSize: 12, color: "#27500A", marginTop: 10 }}>
+            Sabores com arte pronta aparecem na loja com a opção "cinta personalizada" (+{fmtBRL(CINTA_PRINT_UNIT)} por unidade).
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// Staff side of the custom-band service: the designer (fabricante/adm)
+// marks created arts ready, and approves or refuses reseller-supplied files.
+function CintaStaffPanel({ arts }) {
+  const isPending = (a) => a.status === "solicitada" || a.status === "em_analise";
+  const sorted = [...arts].sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0) || new Date(b.createdAt) - new Date(a.createdAt));
+
+  async function update(art, patch) {
+    try {
+      await saveCintaArt({ ...art, ...patch });
+    } catch (e) {
+      console.error("cinta update error", e);
+      alert("Não foi possível atualizar a arte. Tente novamente.");
+    }
+  }
+  function refuse(art) {
+    const note = window.prompt("Motivo da recusa (o revendedor vai ver):");
+    if (note === null) return;
+    update(art, { status: "recusada", designerNote: note.trim() });
+  }
+  function remove(art) {
+    if (!confirm(`Excluir a arte de ${art.flavor} de ${art.email}? Os arquivos enviados também serão apagados.`)) return;
+    deleteCintaArt(art);
+  }
+
+  if (sorted.length === 0) return <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum pedido de cinta personalizada ainda.</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {sorted.map((a) => (
+        <Card key={a.id}>
+          <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+            <div>
+              <div style={{ fontWeight: 700, color: "#3D2419" }}>{a.email}</div>
+              <div style={{ fontSize: 12, color: "#8A7A63" }}>Brownie {a.flavor} · {new Date(a.createdAt).toLocaleString("pt-BR")}</div>
+            </div>
+            <CintaArtInfo art={a} />
+          </div>
+          {a.brand && <div style={{ fontSize: 13 }}><strong>Marca:</strong> {a.brand}</div>}
+          {a.notes && <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}><strong>Briefing:</strong> {a.notes}</div>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {a.logoFileId && <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => downloadCintaFile(a.logoFileId, "logo.jpg")}>Baixar logo</Btn>}
+            {a.fileId && <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => downloadCintaFile(a.fileId, a.fileName)}>Baixar arte ({a.fileName})</Btn>}
+            {a.status === "solicitada" && <Btn style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => update(a, { status: "pronta" })}>Marcar arte pronta</Btn>}
+            {a.status === "em_analise" && (
+              <>
+                <Btn style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => update(a, { status: "pronta", designerNote: "" })}>Aprovar arte</Btn>
+                <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => refuse(a)}>Recusar</Btn>
+              </>
+            )}
+            {a.fee > 0 && !a.feePaid && <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => update(a, { feePaid: true })}>Marcar taxa paga</Btn>}
+            <Btn variant="danger" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => remove(a)}>Excluir</Btn>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport, chats, onSendChatMessage, cintaArts }) {
   const myChat = chats.find((c) => c.email === email);
   const [cart, setCart] = useState({});
   const [addr, setAddr] = useState("");
@@ -818,7 +1157,15 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
   const cartItems = Object.entries(cart).filter(([, q]) => q > 0);
-  const total = cartItems.reduce((s, [, q]) => s + q * price, 0);
+  // Flavors whose custom-band art is ready: only those can be ordered with
+  // the band (price + CINTA_PRINT_UNIT per unit, no development fee again).
+  const readyFlavors = new Set((cintaArts || []).filter((a) => a.email === email && a.status === "pronta").map((a) => a.flavor));
+  function lineInfo(key) {
+    const { productId, custom } = parseLineKey(key);
+    const product = products.find((pr) => pr.id === productId);
+    return { productId, custom, product, unit: price + (custom ? CINTA_PRINT_UNIT : 0) };
+  }
+  const total = cartItems.reduce((s, [key, q]) => s + q * lineInfo(key).unit, 0);
   const totalUnits = cartItems.reduce((s, [, q]) => s + q, 0);
 
   useEffect(() => {
@@ -829,6 +1176,17 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
       .catch((e) => { console.error("pix qr error", e); if (!cancelled) setPixQrImage(null); });
     return () => { cancelled = true; };
   }, [role, total]);
+
+  useEffect(() => {
+    if (role !== "revenda" && tab === "cinta") setTab("loja");
+  }, [role, tab]);
+  useEffect(() => {
+    if (role === "revenda") return;
+    setCart((c) => {
+      const entries = Object.entries(c);
+      return entries.some(([k]) => k.endsWith("#c")) ? Object.fromEntries(entries.filter(([k]) => !k.endsWith("#c"))) : c;
+    });
+  }, [role]);
 
   // Abandoned-cart nudge: if items sit in the cart for a while with no
   // checkout, send one automated chat message offering help, plus a modal
@@ -891,14 +1249,16 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
     if (cartItems.length === 0) return;
     if (!cadastro) { alert("Finalize seu cadastro (pessoa física ou jurídica) antes de fazer o pedido."); return; }
     if (!addr.trim() || !whats.trim()) { alert("Preencha endereço e WhatsApp para finalizar o pedido."); return; }
+    const notReady = cartItems.map(([key]) => lineInfo(key)).find((l) => l.custom && !readyFlavors.has(l.product.flavor));
+    if (notReady) { alert(`A arte da cinta personalizada de ${notReady.product.flavor} ainda não está pronta. Remova essa opção do carrinho ou aguarde a arte ficar pronta.`); return; }
 
     const baseOrder = {
       id: uid(),
       email,
       role,
-      items: cartItems.map(([productId, qty]) => {
-        const p = products.find((pr) => pr.id === productId);
-        return { productId, flavor: p.flavor, qty, unitPrice: price };
+      items: cartItems.map(([key, qty]) => {
+        const { productId, custom, product, unit } = lineInfo(key);
+        return { productId, lineKey: key, flavor: product.flavor, qty, unitPrice: unit, ...(custom ? { customBand: true } : {}) };
       }),
       total,
       address: addr,
@@ -944,6 +1304,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
         <div style={{ display: "flex", gap: 8 }}>
           <Btn variant={tab === "loja" ? "dark" : "ghost"} onClick={() => setTab("loja")}>Painel</Btn>
           <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Meus pedidos ({myOrders.length})</Btn>
+          {role === "revenda" && <Btn variant={tab === "cinta" ? "dark" : "ghost"} onClick={() => setTab("cinta")}>Cinta personalizada</Btn>}
           <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
         </div>
       </div>
@@ -995,6 +1356,19 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                     <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id, 1)}>+</Btn>
                   </div>
                 </div>
+                {role === "revenda" && readyFlavors.has(p.flavor) && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed #E4E1D6", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 12, color: "#5F5E5A" }}>
+                      Com cinta personalizada<br />
+                      <strong style={{ color: "#C4577A" }}>{fmtBRL(price + CINTA_PRINT_UNIT)}</strong> un.
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id + "#c", -1)}>-</Btn>
+                      <span style={{ minWidth: 16, textAlign: "center" }}>{cart[p.id + "#c"] || 0}</span>
+                      <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id + "#c", 1)}>+</Btn>
+                    </div>
+                  </div>
+                )}
               </Card>
             ))}
           </div>
@@ -1005,12 +1379,12 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
               <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum item selecionado ainda.</div>
             ) : (
               <div>
-                {cartItems.map(([id, q]) => {
-                  const p = products.find((pr) => pr.id === id);
+                {cartItems.map(([key, q]) => {
+                  const { product: p, custom, unit } = lineInfo(key);
                   return (
-                    <div key={id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                      <span>{q}x Brownie {p.flavor}</span>
-                      <span>{fmtBRL(q * price)}</span>
+                    <div key={key} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                      <span>{q}x Brownie {p.flavor}{custom ? " (cinta personalizada)" : ""}</span>
+                      <span>{fmtBRL(q * unit)}</span>
                     </div>
                   );
                 })}
@@ -1115,7 +1489,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 <StatusBadge status={o.status} />
               </div>
               <div style={{ fontSize: 13 }}>
-                {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor}</div>)}
+                {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor}{it.customBand ? " · cinta personalizada" : ""}</div>)}
               </div>
               <div style={{ fontWeight: 700, marginTop: 6 }}>{fmtBRL(o.total)}</div>
               {o.paymentMethod === "Pix" && o.paymentProof && (
@@ -1136,7 +1510,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
               {o.salesReport && (
                 <div style={{ marginTop: 10, borderTop: "1px solid #E4E1D6", paddingTop: 10, fontSize: 12, color: "#8A7A63" }}>
                   <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 4 }}>Vendas informadas</div>
-                  {o.salesReport.items.map((it) => <div key={it.productId}>{it.flavor}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
+                  {o.salesReport.items.map((it) => <div key={it.lineKey || it.productId}>{it.flavor}{it.customBand ? " (cinta personalizada)" : ""}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
                 </div>
               )}
               <DeliveryConfirm order={o} onConfirmDelivery={onConfirmDelivery} />
@@ -1144,6 +1518,8 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
           ))}
         </div>
       )}
+
+      {tab === "cinta" && role === "revenda" && <CintaPanel email={email} products={products} arts={cintaArts || []} />}
 
       {tab === "chat" && (
         <Card>
@@ -1168,12 +1544,12 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum item selecionado ainda.</div>
               ) : (
                 <div>
-                  {cartItems.map(([id, q]) => {
-                    const p = products.find((pr) => pr.id === id);
+                  {cartItems.map(([key, q]) => {
+                    const { product: p, custom, unit } = lineInfo(key);
                     return (
-                      <div key={id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                        <span>{q}x Brownie {p.flavor}</span>
-                        <span>{fmtBRL(q * price)}</span>
+                      <div key={key} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                        <span>{q}x Brownie {p.flavor}{custom ? " (cinta personalizada)" : ""}</span>
+                        <span>{fmtBRL(q * unit)}</span>
                       </div>
                     );
                   })}
@@ -1387,10 +1763,11 @@ function BellToggle({ role }) {
 }
 
 // ---------- Fabricante ----------
-function Fabricante({ orders, products, stock, resellers, chats, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
+function Fabricante({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
+  const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise").length;
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
@@ -1399,7 +1776,7 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
           <Btn variant={tab === "estoque" ? "dark" : "ghost"} onClick={() => setTab("estoque")}>
             Estoque{lowStock.length > 0 && ` (${lowStock.length} em falta)`}
           </Btn>
-          <Btn variant={tab === "administracao" ? "dark" : "ghost"} onClick={() => setTab("administracao")}>Administração</Btn>
+          <Btn variant={tab === "administracao" ? "dark" : "ghost"} onClick={() => setTab("administracao")}>Administração{pendingCintas > 0 && ` (${pendingCintas} cinta${pendingCintas > 1 ? "s" : ""} pendente${pendingCintas > 1 ? "s" : ""})`}</Btn>
           <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
           <BellToggle role="fabricante" />
         </div>
@@ -1407,11 +1784,11 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
           <div style={{ display: "flex", gap: 8 }}>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos.csv", [
               ["Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.role, o.items.map((i) => `${i.qty}x ${i.flavor}`).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
+              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório de pedidos", [
               ["Data", "Cliente", "Itens", "Total", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.items.map((i) => `${i.qty}x ${i.flavor}`).join("; "), fmtBRL(o.total), o.status]),
+              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
             ])}>Imprimir PDF</Btn>
           </div>
         )}
@@ -1448,6 +1825,7 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
           onManualResellerToggle={onManualResellerToggle}
           onMarkPaymentReceived={onMarkPaymentReceived}
           onCreateTestOrder={onCreateTestOrder}
+          cintaArts={cintaArts}
         />
       )}
 
@@ -1471,7 +1849,12 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
               <StatusBadge status={o.status} />
             </div>
             <div style={{ fontSize: 13, marginBottom: 8 }}>
-              {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor} — {fmtBRL(it.unitPrice)}</div>)}
+              {o.items.map((it, i) => (
+                <div key={i}>
+                  {it.qty}x Brownie {it.flavor} — {fmtBRL(it.unitPrice)}
+                  {it.customBand && <> <Badge tone="rose">cinta personalizada</Badge></>}
+                </div>
+              ))}
             </div>
             <div style={{ fontWeight: 700, marginBottom: 8 }}>{fmtBRL(o.total)}</div>
             {o.deliveryPhoto && (
@@ -1498,7 +1881,7 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
             {o.salesReport && (
               <div style={{ marginBottom: 8, fontSize: 12, color: "#8A7A63" }}>
                 <div style={{ fontWeight: 700, color: "#3D2419" }}>Vendas informadas pelo revendedor</div>
-                {o.salesReport.items.map((it) => <div key={it.productId}>{it.flavor}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
+                {o.salesReport.items.map((it) => <div key={it.lineKey || it.productId}>{it.flavor}{it.customBand ? " (cinta personalizada)" : ""}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
               </div>
             )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1579,10 +1962,11 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
-function Adm({ orders, products, stock, resellers, chats, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
+function Adm({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const [showManualTools, setShowManualTools] = useState(false);
+  const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
   const activeResellers = resellers.filter((r) => r.status === "ativo");
   const totalFaturado = orders.filter((o) => o.status !== STATUS_CANCELLED).reduce((s, o) => s + o.total, 0);
@@ -1621,9 +2005,12 @@ function Adm({ orders, products, stock, resellers, chats, currentEmail, onApprov
         <Btn variant={tab === "revendas" ? "dark" : "ghost"} onClick={() => setTab("revendas")}>Revendas ({pendingResellers.length} pendentes)</Btn>
         <Btn variant={tab === "produtos" ? "dark" : "ghost"} onClick={() => setTab("produtos")}>Produtos</Btn>
         <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Pedidos</Btn>
+        <Btn variant={tab === "cintas" ? "dark" : "ghost"} onClick={() => setTab("cintas")}>Cintas ({pendingCintas.length} pendentes)</Btn>
         <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
         <BellToggle role="adm" />
       </div>
+
+      {tab === "cintas" && <CintaStaffPanel arts={cintaArts || []} />}
 
       {tab === "chat" && (
         <ChatPanel chats={chats} orders={orders} onSend={(clientEmail, text) => onSendChatMessage(clientEmail, "adm", currentEmail, text)} />
@@ -1804,6 +2191,7 @@ export default function App() {
   const [stock, setStock] = useState(DEFAULT_STOCK);
   const [cadastro, setCadastro] = useState(null);
   const [chats, setChats] = useState([]);
+  const [cintaArts, setCintaArts] = useState([]);
 
   const email = user ? user.email.toLowerCase() : null;
 
@@ -1829,6 +2217,7 @@ export default function App() {
       else await save("metanoia_products", DEFAULT_PRODUCTS);
       if (data.metanoia_orders) setOrders(data.metanoia_orders);
       if (data.metanoia_chats) setChats(data.metanoia_chats);
+      if (data.metanoia_cintaarts) setCintaArts(data.metanoia_cintaarts);
       if (data.metanoia_resellers) setResellers(data.metanoia_resellers);
       if (data.metanoia_stock) setStock(data.metanoia_stock);
       else await save("metanoia_stock", DEFAULT_STOCK);
@@ -1845,6 +2234,7 @@ export default function App() {
       if (key === "metanoia_products") setProducts(items);
       else if (key === "metanoia_orders") setOrders(items);
       else if (key === "metanoia_chats") setChats(items);
+      else if (key === "metanoia_cintaarts") setCintaArts(items);
       else if (key === "metanoia_resellers") setResellers(items);
       else if (key === "metanoia_stock") setStock(items);
     });
@@ -2093,6 +2483,7 @@ export default function App() {
           onConfirmDelivery={handleConfirmDelivery}
           onSubmitSalesReport={handleSubmitSalesReport}
           chats={chats}
+          cintaArts={cintaArts}
           onSendChatMessage={handleSendChatMessage}
         />
       )}
@@ -2112,6 +2503,7 @@ export default function App() {
           onMarkPaymentReceived={handleMarkPaymentReceived}
           onCreateTestOrder={handleCreateTestOrder}
           chats={chats}
+          cintaArts={cintaArts}
           currentEmail={email}
           onSendChatMessage={handleSendChatMessage}
         />
@@ -2136,6 +2528,7 @@ export default function App() {
             onMarkPaymentReceived={handleMarkPaymentReceived}
             onCreateTestOrder={handleCreateTestOrder}
             chats={chats}
+            cintaArts={cintaArts}
             currentEmail={email}
             onSendChatMessage={handleSendChatMessage}
           />

@@ -220,21 +220,66 @@ function timeGreeting() {
   if (h < 18) return "boa tarde";
   return "boa noite";
 }
-function announceNewOrder() {
-  speakAlert(`Olá, ${timeGreeting()}. Você tem mais um pedido.`);
+// ---------- Alert sounds (fabricante/adm) ----------
+// Staff can be told about a new order or a client calling in the chat either
+// by a spoken message or by one of three bells. The bells are synthesized
+// with Web Audio (no audio files). Browsers only play sound after the user
+// has interacted with the page once, so the first click anywhere unlocks it.
+let audioCtx = null;
+function getAudioCtx() {
+  try {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return audioCtx;
+  } catch (e) {
+    return null;
+  }
 }
-// Browsers only allow audio/speech after a real user gesture on the page,
-// so the "new order" bell has to be explicitly turned on by a click —
-// silently trying to speak() on page load would just fail with no sound
-// and no error. The preference is per-browser (localStorage), per role.
+// partials: [frequency ratio, amplitude, decay seconds]; strikes: offsets of
+// each hit within one ring; gap: seconds between rings.
+const BELL_SOUNDS = [
+  { id: 1, name: "Sino clássico", base: 523, partials: [[1, 1, 2.0], [2.0, 0.55, 1.6], [2.76, 0.4, 1.2], [5.4, 0.22, 0.8], [8.93, 0.1, 0.5]], strikes: [0], gap: 1.3 },
+  { id: 2, name: "Sineta de balcão (ding-ding)", base: 1568, partials: [[1, 1, 0.9], [2.4, 0.4, 0.5], [4.1, 0.15, 0.3]], strikes: [0, 0.22], gap: 1.0 },
+  { id: 3, name: "Sino grave", base: 196, partials: [[1, 1, 3.2], [2.0, 0.5, 2.4], [2.76, 0.35, 1.8], [4.2, 0.15, 1.0]], strikes: [0], gap: 2.0 },
+];
+function playBell(bellId, rings) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  const bell = BELL_SOUNDS.find((b) => b.id === bellId) || BELL_SOUNDS[0];
+  const t0 = ctx.currentTime + 0.05;
+  for (let r = 0; r < rings; r++) {
+    for (const offset of bell.strikes) {
+      const t = t0 + r * bell.gap + offset;
+      for (const [ratio, amp, decay] of bell.partials) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = bell.base * ratio;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.35 * amp, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + decay + 0.05);
+      }
+    }
+  }
+}
 function bellStorageKey(role) {
   return "metanoia_bell_" + role;
 }
+// On by default; the per-browser choice (localStorage, per role) wins.
 function isBellEnabled(role) {
   try {
-    return localStorage.getItem(bellStorageKey(role)) === "1";
+    const v = localStorage.getItem(bellStorageKey(role));
+    return v === null ? true : v === "1";
   } catch (e) {
-    return false;
+    return true;
   }
 }
 function setBellEnabled(role, enabled) {
@@ -243,6 +288,46 @@ function setBellEnabled(role, enabled) {
   } catch (e) {
     console.error("bell preference save error", e);
   }
+}
+function getSoundSettings(role) {
+  try {
+    const raw = localStorage.getItem("metanoia_sound_" + role);
+    if (raw) {
+      const o = JSON.parse(raw);
+      return { mode: o.mode === "sino" ? "sino" : "voz", bell: [1, 2, 3].includes(o.bell) ? o.bell : 1 };
+    }
+  } catch (e) {
+    /* fall through to defaults */
+  }
+  return { mode: "voz", bell: 1 };
+}
+function setSoundSettings(role, settings) {
+  try {
+    localStorage.setItem("metanoia_sound_" + role, JSON.stringify(settings));
+  } catch (e) {
+    console.error("sound preference save error", e);
+  }
+}
+function alertMessage(kind) {
+  return kind === "chat"
+    ? `Olá, ${timeGreeting()}. Alguém está chamando você no chat.`
+    : `Olá, ${timeGreeting()}. Você tem mais um pedido.`;
+}
+// True if any chat gained a message from a client since prevCounts (a map
+// of client e-mail -> how many messages we had already seen).
+function hasNewClientMessage(prevCounts, chats) {
+  return chats.some((c) => (c.messages || []).slice(prevCounts[c.email] || 0).some((m) => m.from === "cliente"));
+}
+// kind: "order" (new order — bell rings 3x) or "chat" (client message — rings 1x)
+function playAlert(role, kind) {
+  const { mode, bell } = getSoundSettings(role);
+  if (mode === "sino") playBell(bell, kind === "chat" ? 1 : 3);
+  else speakAlert(alertMessage(kind));
+}
+function playConfirm(role) {
+  const { mode, bell } = getSoundSettings(role);
+  if (mode === "sino") playBell(bell, 1);
+  else speakAlert("Campainha ativada! Você vai ser avisado de novos pedidos e de mensagens no chat.");
 }
 
 // Data lives in Firestore under the shared "metanoia" collection (matches
@@ -1799,16 +1884,91 @@ function ManualOrderForm({ products }) {
 
 function BellToggle({ role }) {
   const [enabled, setEnabled] = useState(() => isBellEnabled(role));
+  const [settings, setSettingsState] = useState(() => getSoundSettings(role));
+  const [open, setOpen] = useState(false);
+
   function toggle() {
     const next = !enabled;
     setBellEnabled(role, next);
     setEnabled(next);
-    if (next) speakAlert("Campainha ativada! Você vai ouvir um aviso a cada novo pedido.");
+    getAudioCtx();
+    if (next) playConfirm(role);
   }
+  function update(patch) {
+    const next = { ...settings, ...patch };
+    setSettingsState(next);
+    setSoundSettings(role, next);
+  }
+
   return (
-    <Btn variant={enabled ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={toggle}>
-      {enabled ? "🔔 Campainha ativada" : "🔕 Ativar campainha"}
-    </Btn>
+    <>
+      <Btn variant={enabled ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={toggle}>
+        {enabled ? "🔔 Campainha ativada" : "🔕 Ativar campainha"}
+      </Btn>
+      <Btn variant="ghost" style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => { getAudioCtx(); setOpen(true); }}>
+        ⚙ Som dos avisos
+      </Btn>
+
+      {open && (
+        <div
+          onClick={() => setOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(61,36,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, maxHeight: "92vh", overflowY: "auto" }}>
+            <Card>
+              <div style={{ fontWeight: 700, fontSize: 16, color: "#3D2419", marginBottom: 6 }}>Som dos avisos</div>
+              <div style={{ fontSize: 13, color: "#5F5E5A", marginBottom: 12 }}>
+                Você é avisado quando chega um pedido novo e quando alguém chama no chat. Escolha como quer ouvir:
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                <Btn variant={settings.mode === "voz" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => update({ mode: "voz" })}>🗣 Alguém falando</Btn>
+                <Btn variant={settings.mode === "sino" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => update({ mode: "sino" })}>🔔 Campainha</Btn>
+              </div>
+
+              {settings.mode === "sino" ? (
+                <div>
+                  <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Escolha o sino:</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+                    {BELL_SOUNDS.map((b) => (
+                      <div
+                        key={b.id}
+                        style={{
+                          display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 8,
+                          border: "1px solid " + (settings.bell === b.id ? "#C4577A" : "#E4E1D6"), background: settings.bell === b.id ? "#FBEAF0" : "#fff",
+                        }}
+                      >
+                        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", flex: 1 }}>
+                          <input type="radio" name={"bell-" + role} checked={settings.bell === b.id} onChange={() => update({ bell: b.id })} />
+                          {b.name}
+                        </label>
+                        <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => playBell(b.id, 1)}>▶ Ouvir</Btn>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 12 }}>Pedido novo: o sino toca 3 vezes · Mensagem no chat: toca 1 vez.</div>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, color: "#5F5E5A" }}><strong>Pedido novo:</strong> “{alertMessage("order")}”</div>
+                    <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => speakAlert(alertMessage("order"))}>▶ Ouvir</Btn>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <div style={{ fontSize: 12, color: "#5F5E5A" }}><strong>Chat:</strong> “{alertMessage("chat")}”</div>
+                    <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => speakAlert(alertMessage("chat"))}>▶ Ouvir</Btn>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, color: "#8A7A63", marginBottom: 12 }}>
+                Os avisos só tocam com a campainha ativada. Se acabou de abrir a página, clique em qualquer lugar uma vez para o navegador liberar o som.
+              </div>
+              <Btn style={{ width: "100%" }} onClick={() => setOpen(false)}>Pronto</Btn>
+            </Card>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1876,6 +2036,7 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
           onMarkPaymentReceived={onMarkPaymentReceived}
           onCreateTestOrder={onCreateTestOrder}
           cintaArts={cintaArts}
+          bellRole="fabricante"
         />
       )}
 
@@ -2012,7 +2173,7 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
-function Adm({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
+function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cintaArts, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const [showManualTools, setShowManualTools] = useState(false);
@@ -2057,7 +2218,7 @@ function Adm({ orders, products, stock, resellers, chats, cintaArts, currentEmai
         <Btn variant={tab === "pedidos" ? "dark" : "ghost"} onClick={() => setTab("pedidos")}>Pedidos</Btn>
         <Btn variant={tab === "cintas" ? "dark" : "ghost"} onClick={() => setTab("cintas")}>Cintas ({pendingCintas.length} pendentes)</Btn>
         <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
-        <BellToggle role="adm" />
+        <BellToggle role={bellRole} />
       </div>
 
       {tab === "cintas" && <CintaStaffPanel arts={cintaArts || []} />}
@@ -2073,7 +2234,7 @@ function Adm({ orders, products, stock, resellers, chats, cintaArts, currentEmai
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Revendedores ativos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{activeResellers.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Ingredientes em falta</div><div style={{ fontSize: 22, fontWeight: 700, color: lowStock.length ? "#C4394A" : "#3D2419" }}>{lowStock.length}</div></Card>
           <Card>
-            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso sonoro de novo pedido (ative a campainha no topo da tela antes)</div>
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso de novo pedido (usa o som escolhido em “⚙ Som dos avisos”)</div>
             <Btn variant="ghost" style={{ width: "100%" }} onClick={onCreateTestOrder}>🔔 Campainha de teste</Btn>
           </Card>
         </div>
@@ -2301,21 +2462,42 @@ export default function App() {
     );
   }, [email]);
 
-  // Announce brand-new orders to fabricante/adm with a spoken alert. The
-  // ref starts at null so the first population (existing orders loading
-  // in) never triggers it — only orders that arrive afterwards do.
+  // Alert fabricante/adm about brand-new orders and about client messages in
+  // the chat. Both start tracking only after the first load finishes, so
+  // what already exists when the panel opens is never announced — only what
+  // arrives afterwards.
   const knownOrderIds = useRef(null);
   useEffect(() => {
+    if (loading) { knownOrderIds.current = null; return; }
     if (knownOrderIds.current === null) {
       knownOrderIds.current = new Set(orders.map((o) => o.id));
       return;
     }
     const isNew = orders.some((o) => !knownOrderIds.current.has(o.id));
     if (isNew && (activeRole === "fabricante" || activeRole === "adm") && isBellEnabled(activeRole)) {
-      announceNewOrder();
+      playAlert(activeRole, "order");
     }
     knownOrderIds.current = new Set(orders.map((o) => o.id));
-  }, [orders, activeRole]);
+  }, [orders, activeRole, loading]);
+
+  const knownChatCounts = useRef(null);
+  useEffect(() => {
+    if (loading) { knownChatCounts.current = null; return; }
+    const counts = Object.fromEntries(chats.map((c) => [c.email, (c.messages || []).length]));
+    if (knownChatCounts.current === null) { knownChatCounts.current = counts; return; }
+    const clientCalled = hasNewClientMessage(knownChatCounts.current, chats);
+    if (clientCalled && (activeRole === "fabricante" || activeRole === "adm") && isBellEnabled(activeRole)) {
+      playAlert(activeRole, "chat");
+    }
+    knownChatCounts.current = counts;
+  }, [chats, activeRole, loading]);
+
+  // First click anywhere unlocks browser audio for the bell sounds.
+  useEffect(() => {
+    const unlock = () => { getAudioCtx(); };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, []);
 
   const myResellerInfo = useMemo(() => resellers.find((r) => r.email === email), [resellers, email]);
 

@@ -813,6 +813,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [tab, setTab] = useState("loja");
   const [showCartModal, setShowCartModal] = useState(false);
   const [pixQrImage, setPixQrImage] = useState(null);
+  const [orderType, setOrderType] = useState("novo"); // "novo" | "reposicao" (revenda only)
 
   const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
@@ -849,6 +850,17 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 
   const myOrders = orders.filter((o) => o.email === email).sort((a, b) => new Date(b.date) - new Date(a.date));
   const pendingConsignment = myOrders.find((o) => o.role === "revenda" && o.paymentType === "consignado" && o.paymentStatus !== "pago");
+
+  // Reseller minimums: a "novo pedido" always needs RESELLER_MIN_ORDER_UNITS
+  // (so the very first purchase does too). A "reposição" may be as small as
+  // what was sold in the previous order's sales report — but only possible
+  // once that report exists — and can always be larger if they want.
+  const lastRevendaOrder = myOrders.find((o) => o.role === "revenda");
+  const lastSales = lastRevendaOrder && lastRevendaOrder.salesReport ? lastRevendaOrder.salesReport.items : [];
+  const soldUnits = lastSales.reduce((s, it) => s + it.vendidos, 0);
+  const canRestock = soldUnits > 0;
+  const effectiveOrderType = role === "revenda" && canRestock ? orderType : "novo";
+  const minUnits = effectiveOrderType === "reposicao" ? soldUnits : RESELLER_MIN_ORDER_UNITS;
 
   const canRequestReseller = role === "cliente" && (!resellerInfo || resellerInfo.status === "inativo");
   const pendingRequest = resellerInfo && resellerInfo.status === "pendente";
@@ -897,11 +909,16 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 
     if (role === "revenda") {
       if (pendingConsignment) { alert("Você ainda tem uma consignação em aberto. Informe as vendas e aguarde a confirmação do pagamento antes de fazer um novo pedido."); return; }
-      if (totalUnits < RESELLER_MIN_ORDER_UNITS) { alert(`Pedidos de revenda precisam de no mínimo ${RESELLER_MIN_ORDER_UNITS} unidades (você selecionou ${totalUnits}).`); return; }
+      if (totalUnits < minUnits) {
+        alert(effectiveOrderType === "reposicao"
+          ? `Para repor o que foi vendido, o pedido precisa ter no mínimo ${soldUnits} unidades (você selecionou ${totalUnits}).`
+          : `Um novo pedido de revenda precisa ter no mínimo ${RESELLER_MIN_ORDER_UNITS} unidades (você selecionou ${totalUnits}).`);
+        return;
+      }
       const dueDate = new Date();
       dueDate.setDate(dueDate.getDate() + RESELLER_PAYMENT_DAYS);
-      onPlaceOrder({ ...baseOrder, paymentType: "consignado", paymentStatus: "pendente", paymentDueDate: dueDate.toISOString() });
-      setCart({}); setAddr(""); setWhats("");
+      onPlaceOrder({ ...baseOrder, orderType: effectiveOrderType, paymentType: "consignado", paymentStatus: "pendente", paymentDueDate: dueDate.toISOString() });
+      setCart({}); setAddr(""); setWhats(""); setOrderType("novo");
       return;
     }
 
@@ -1009,8 +1026,29 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 ) : (
                   <>
                     {role === "revenda" && (
-                      <div style={{ marginTop: 12, fontSize: 12, color: "#8A7A63" }}>
-                        Pedido mínimo de revenda: {RESELLER_MIN_ORDER_UNITS} unidades ({totalUnits} selecionadas) · Pagamento consignado, com {RESELLER_PAYMENT_DAYS} dias de prazo após a entrega.
+                      <div style={{ marginTop: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "#3D2419", marginBottom: 6 }}>Tipo do pedido</div>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                          <Btn variant={effectiveOrderType === "novo" ? "dark" : "ghost"} style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => setOrderType("novo")}>
+                            Novo pedido (mín. {RESELLER_MIN_ORDER_UNITS} un.)
+                          </Btn>
+                          <Btn
+                            variant={effectiveOrderType === "reposicao" ? "dark" : "ghost"}
+                            style={{ padding: "6px 14px", fontSize: 13 }}
+                            disabled={!canRestock}
+                            onClick={() => setOrderType("reposicao")}
+                          >
+                            Reposição{canRestock ? ` (mín. ${soldUnits} un.)` : ""}
+                          </Btn>
+                        </div>
+                        <div style={{ fontSize: 12, color: "#8A7A63" }}>
+                          {canRestock
+                            ? <>Você informou {soldUnits} unidades vendidas no último pedido ({lastSales.filter((it) => it.vendidos > 0).map((it) => `${it.flavor}: ${it.vendidos}`).join(", ")}). Na reposição você pode pedir só o que vendeu ou mais.</>
+                            : lastRevendaOrder
+                              ? <>Para fazer uma reposição, informe as vendas do pedido anterior em "Meus pedidos".</>
+                              : <>Na primeira compra o mínimo é de {RESELLER_MIN_ORDER_UNITS} unidades.</>}
+                          {" "}({totalUnits} selecionadas) · Pagamento consignado, com {RESELLER_PAYMENT_DAYS} dias de prazo após a entrega.
+                        </div>
                       </div>
                     )}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
@@ -1070,7 +1108,10 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
           {myOrders.map((o) => (
             <Card key={o.id}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
-                <span style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")}</span>
+                <span style={{ fontSize: 12, color: "#8A7A63" }}>
+                  {new Date(o.date).toLocaleString("pt-BR")}{" "}
+                  {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}
+                </span>
                 <StatusBadge status={o.status} />
               </div>
               <div style={{ fontSize: 13 }}>
@@ -1423,7 +1464,7 @@ function Fabricante({ orders, products, stock, resellers, chats, currentEmail, o
               <div style={{ display: "flex", gap: 10 }}>
                 <Avatar email={o.email} size={32} />
                 <div>
-                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.email} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.email} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                   <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
                 </div>
               </div>
@@ -1727,7 +1768,7 @@ function Adm({ orders, products, stock, resellers, chats, currentEmail, onApprov
               <Card key={o.id}>
                 <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                   <div>
-                    <div style={{ fontWeight: 700 }}>{o.email} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                    <div style={{ fontWeight: 700 }}>{o.email} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                     <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>

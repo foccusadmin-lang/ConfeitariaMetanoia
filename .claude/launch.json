@@ -12,6 +12,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "C:/Users/HOME/Desktop/mao-quan-conecta", "exec", "--", "vite", "C:/Users/HOME/Desktop/mao-quan-conecta", "--port", "5180", "--strictPort"],
       "port": 5180
+    },
+    {
+      "name": "grupo-wd",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "http-server", "C:/Users/HOME/Desktop/grupo-wd", "-p", "5190", "-c-1", "--silent"],
+      "port": 5190
     }
   ]
 }

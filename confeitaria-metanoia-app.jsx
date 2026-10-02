@@ -79,6 +79,26 @@ const STATUS_FLOW = [
 ];
 const STATUS_CANCELLED = "Pedido cancelado";
 
+const PAYMENT_METHODS = ["Pix", "Cartão de crédito", "Cartão de débito", "Dinheiro"];
+
+// Orders created by staff for people who never signed up have no e-mail.
+// They get a stable pseudo e-mail (from the phone) so the rest of the app,
+// which groups everything by o.email, keeps working.
+const WALKIN_DOMAIN = "@sem-email.local";
+function isWalkInEmail(email) { return typeof email === "string" && email.endsWith(WALKIN_DOMAIN); }
+function orderWho(o) {
+  if (o.customerName) return o.customerName;
+  if (isWalkInEmail(o.email)) return "Cliente sem cadastro";
+  return o.email;
+}
+function toLocalInputValue(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// Orders staff just created on this device: the creator doesn't need the
+// "new order" bell for their own entry (other staff devices still ring).
+const locallyCreatedOrderIds = new Set();
+
 function fmtBRL(v) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
@@ -1786,18 +1806,22 @@ function ManualClienteForm() {
   );
 }
 
-// Logs an order that already happened outside the system (old WhatsApp/
-// in-person sale) against any client e-mail, with an editable date/status
-// instead of the live checkout flow's Pix/consignment requirements.
-function ManualOrderForm({ products }) {
+// Staff-side order entry. mode "antigo" logs an order that already happened
+// for a registered client's e-mail; mode "novo" ("Criar pedido") opens a
+// live order for someone who isn't registered in the platform, identified
+// by name + phone, so the day's orders stay under adm/fabricante control.
+function ManualOrderForm({ products, mode = "antigo", onDone }) {
+  const novo = mode === "novo";
   const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("cliente");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 16));
-  const [status, setStatus] = useState("Pedido entregue");
+  const [date, setDate] = useState(() => toLocalInputValue(new Date()));
+  const [status, setStatus] = useState(novo ? STATUS_FLOW[1] : "Pedido entregue");
   const [paymentMethod, setPaymentMethod] = useState("");
   const [address, setAddress] = useState("");
   const [whatsapp, setWhatsapp] = useState("");
+  const [notes, setNotes] = useState("");
   const [qtyByProduct, setQtyByProduct] = useState({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -1808,11 +1832,21 @@ function ManualOrderForm({ products }) {
     productId: p.id, flavor: p.flavor, qty: Number(qtyByProduct[p.id]), unitPrice: price,
   }));
   const total = items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+  const consignado = paymentMethod === "Consignado (7 dias)";
 
   async function handleSave() {
-    const em = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setErr("Digite um e-mail válido."); setMsg(""); return; }
+    const emailTyped = email.trim().toLowerCase();
+    const phoneDigits = whatsapp.replace(/\D/g, "");
+    let em = emailTyped;
+    if (novo) {
+      if (!name.trim()) { setErr("Informe o nome do cliente."); setMsg(""); return; }
+      if (phoneDigits.length < 8) { setErr("Informe o WhatsApp/telefone do cliente."); setMsg(""); return; }
+      if (emailTyped && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTyped)) { setErr("E-mail inválido (ou deixe em branco)."); setMsg(""); return; }
+      if (!emailTyped) em = phoneDigits + WALKIN_DOMAIN;
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setErr("Digite um e-mail válido."); setMsg(""); return; }
     if (items.length === 0) { setErr("Selecione ao menos um item (quantidade maior que zero)."); setMsg(""); return; }
+    const when = new Date(date);
+    if (isNaN(when.getTime())) { setErr("Data/hora inválida."); setMsg(""); return; }
     setErr(""); setMsg(""); setSaving(true);
     try {
       const order = {
@@ -1821,16 +1855,31 @@ function ManualOrderForm({ products }) {
         role,
         items,
         total,
-        address: address.trim() || "Pedido lançado manualmente",
+        address: address.trim() || (novo ? "Retirada / não informado" : "Pedido lançado manualmente"),
         whatsapp: whatsapp.trim() || "-",
         status,
-        date: new Date(date).toISOString(),
+        date: when.toISOString(),
         manualEntry: true,
       };
-      if (paymentMethod) order.paymentMethod = paymentMethod;
+      if (novo) {
+        order.customerName = name.trim();
+        if (!emailTyped) order.walkIn = true;
+        if (notes.trim()) order.notes = notes.trim();
+      }
+      if (consignado) {
+        const due = new Date(when);
+        due.setDate(due.getDate() + RESELLER_PAYMENT_DAYS);
+        order.paymentType = "consignado";
+        order.paymentStatus = "pendente";
+        order.paymentDueDate = due.toISOString();
+      } else if (paymentMethod) {
+        order.paymentMethod = paymentMethod;
+      }
+      if (novo) locallyCreatedOrderIds.add(order.id);
       await saveOrder(order);
-      setMsg(`Pedido de ${em} lançado!`);
+      setMsg(novo ? `Pedido de ${name.trim()} criado!` : `Pedido de ${em} lançado!`);
       setQtyByProduct({});
+      if (novo) { setName(""); setEmail(""); setWhatsapp(""); setAddress(""); setNotes(""); setPaymentMethod(""); setDate(toLocalInputValue(new Date())); if (onDone) onDone(); }
     } finally {
       setSaving(false);
     }
@@ -1838,28 +1887,46 @@ function ManualOrderForm({ products }) {
 
   return (
     <Card style={{ marginBottom: 14 }}>
-      <div style={{ fontWeight: 700, marginBottom: 10, color: "#3D2419" }}>Lançar pedido antigo</div>
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
-        <input placeholder="E-mail do cliente" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
-        <select value={role} onChange={(e) => setRole(e.target.value)} style={inputStyle}>
-          <option value="cliente">Cliente final</option>
-          <option value="revenda">Revenda</option>
-        </select>
-      </div>
+      <div style={{ fontWeight: 700, marginBottom: 10, color: "#3D2419" }}>{novo ? "Criar pedido (cliente/revendedor sem cadastro)" : "Lançar pedido antigo"}</div>
+      {novo ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
+            <input placeholder="Nome do cliente *" value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} />
+            <select value={role} onChange={(e) => { setRole(e.target.value); if (e.target.value !== "revenda" && consignado) setPaymentMethod(""); }} style={inputStyle}>
+              <option value="cliente">Cliente final</option>
+              <option value="revenda">Revenda</option>
+            </select>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+            <input placeholder="WhatsApp/telefone *" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} style={inputStyle} />
+            <input placeholder="E-mail (opcional)" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+          </div>
+        </>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 8 }}>
+          <input placeholder="E-mail do cliente" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} />
+          <select value={role} onChange={(e) => setRole(e.target.value)} style={inputStyle}>
+            <option value="cliente">Cliente final</option>
+            <option value="revenda">Revenda</option>
+          </select>
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
         <input type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
         <select value={status} onChange={(e) => setStatus(e.target.value)} style={inputStyle}>
           {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-        <input placeholder="Endereço (opcional)" value={address} onChange={(e) => setAddress(e.target.value)} style={inputStyle} />
-        <input placeholder="WhatsApp (opcional)" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} style={inputStyle} />
+      <div style={{ display: "grid", gridTemplateColumns: novo ? "1fr 1fr" : "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input placeholder={novo ? "Endereço de entrega (opcional)" : "Endereço (opcional)"} value={address} onChange={(e) => setAddress(e.target.value)} style={inputStyle} />
+        {!novo && <input placeholder="WhatsApp (opcional)" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} style={inputStyle} />}
         <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} style={inputStyle}>
           <option value="">Forma de pagamento</option>
           {PAYMENT_METHODS.map((pm) => <option key={pm} value={pm}>{pm}</option>)}
+          {novo && role === "revenda" && <option value="Consignado (7 dias)">Consignado (7 dias)</option>}
         </select>
       </div>
+      {novo && <input placeholder="Observações (opcional)" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }} />}
       <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>Itens ({role === "revenda" ? "preço revenda" : "preço cliente"}):</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8, marginBottom: 10 }}>
         {products.map((p) => (
@@ -1877,7 +1944,7 @@ function ManualOrderForm({ products }) {
       <div style={{ fontWeight: 700, marginBottom: 8 }}>Total: {fmtBRL(total)}</div>
       {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
       {msg && <div style={{ color: "#27500A", fontSize: 12, marginBottom: 8 }}>{msg}</div>}
-      <Btn disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : "Lançar pedido"}</Btn>
+      <Btn disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : novo ? "Criar pedido" : "Lançar pedido"}</Btn>
     </Card>
   );
 }
@@ -1975,6 +2042,7 @@ function BellToggle({ role }) {
 // ---------- Fabricante ----------
 function Fabricante({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
+  const [showCreate, setShowCreate] = useState(false);
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
   const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise").length;
@@ -1991,14 +2059,15 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
           <BellToggle role="fabricante" />
         </div>
         {tab === "pedidos" && (
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn variant={showCreate ? "dark" : "primary"} onClick={() => setShowCreate((v) => !v)}>{showCreate ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos.csv", [
               ["Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
+              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório de pedidos", [
               ["Data", "Cliente", "Itens", "Total", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
+              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
             ])}>Imprimir PDF</Btn>
           </div>
         )}
@@ -2044,6 +2113,8 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
         <ChatPanel chats={chats} orders={orders} onSend={(clientEmail, text) => onSendChatMessage(clientEmail, "fabricante", currentEmail, text)} />
       )}
 
+      {tab === "pedidos" && showCreate && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreate(false)} />}
+
       {tab === "pedidos" && (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {sorted.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum pedido ainda.</div>}
@@ -2051,10 +2122,11 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
           <Card key={o.id}>
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
               <div style={{ display: "flex", gap: 10 }}>
-                <Avatar email={o.email} size={32} />
+                <Avatar email={o.customerName || o.email} size={32} />
                 <div>
-                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.email} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                   <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
+                  {o.notes && <div style={{ fontSize: 12, color: "#8A7A63" }}>Obs.: {o.notes}</div>}
                 </div>
               </div>
               <StatusBadge status={o.status} />
@@ -2177,6 +2249,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
   const [showManualTools, setShowManualTools] = useState(false);
+  const [showCreateOrder, setShowCreateOrder] = useState(false);
   const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
   const activeResellers = resellers.filter((r) => r.status === "ativo");
@@ -2188,6 +2261,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
     orders.forEach((o) => {
       if (!map[o.email]) map[o.email] = { email: o.email, orders: 0, total: 0, lastOrder: null, address: "", whatsapp: "" };
       const c = map[o.email];
+      if (o.customerName) c.name = o.customerName;
       c.orders += 1;
       if (o.status !== STATUS_CANCELLED) c.total += o.total;
       if (!c.lastOrder || new Date(o.date) > new Date(c.lastOrder)) {
@@ -2204,7 +2278,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
         const r = resellers.find((x) => x.email === c.email);
         return { ...c, resellerStatus: r ? r.status : "cliente final", unitsThisMonth: r ? r.unitsThisMonth : 0 };
       })
-      .filter((c) => c.email.toLowerCase().includes(clientSearch.trim().toLowerCase()))
+      .filter((c) => (c.email + " " + (c.name || "") + " " + (c.whatsapp || "")).toLowerCase().includes(clientSearch.trim().toLowerCase()))
       .sort((a, b) => (b.lastOrder ? new Date(b.lastOrder) : 0) - (a.lastOrder ? new Date(a.lastOrder) : 0));
   }, [orders, resellers, clientSearch]);
 
@@ -2277,9 +2351,9 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
               <Card key={c.email}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
                   <div style={{ display: "flex", gap: 10 }}>
-                    <Avatar email={c.email} size={36} />
+                    <Avatar email={c.name || c.email} size={36} />
                     <div>
-                      <div style={{ fontWeight: 700, color: "#3D2419" }}>{c.email}</div>
+                      <div style={{ fontWeight: 700, color: "#3D2419" }}>{c.name || c.email}{isWalkInEmail(c.email) && <> <Badge tone="gold">sem cadastro</Badge></>}{c.name && !isWalkInEmail(c.email) && <span style={{ fontWeight: 400, fontSize: 12, color: "#8A7A63" }}> · {c.email}</span>}</div>
                       <div style={{ fontSize: 12, color: "#8A7A63" }}>
                         {c.orders} pedido(s) · {fmtBRL(c.total)} gastos · {c.address || "sem endereço registrado"} {c.whatsapp && `· ${c.whatsapp}`}
                       </div>
@@ -2351,22 +2425,24 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
 
       {tab === "pedidos" && (
         <div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <Btn variant={showCreateOrder ? "dark" : "primary"} onClick={() => setShowCreateOrder((v) => !v)}>{showCreateOrder ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos_adm.csv", [
               ["Data", "Cliente", "Perfil", "Total", "Status"],
-              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, o.role, o.total.toFixed(2), o.status]),
+              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório geral de pedidos", [
               ["Data", "Cliente", "Total", "Status"],
-              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), o.email, fmtBRL(o.total), o.status]),
+              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), fmtBRL(o.total), o.status]),
             ])}>Imprimir PDF</Btn>
           </div>
+          {showCreateOrder && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreateOrder(false)} />}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {orders.map((o) => (
               <Card key={o.id}>
                 <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                   <div>
-                    <div style={{ fontWeight: 700 }}>{o.email} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                    <div style={{ fontWeight: 700 }}>{orderWho(o)} {o.walkIn && <Badge tone="gold">sem cadastro</Badge>} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                     <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -2473,7 +2549,7 @@ export default function App() {
       knownOrderIds.current = new Set(orders.map((o) => o.id));
       return;
     }
-    const isNew = orders.some((o) => !knownOrderIds.current.has(o.id));
+    const isNew = orders.some((o) => !knownOrderIds.current.has(o.id) && !locallyCreatedOrderIds.has(o.id));
     if (isNew && (activeRole === "fabricante" || activeRole === "adm") && isBellEnabled(activeRole)) {
       playAlert(activeRole, "order");
     }

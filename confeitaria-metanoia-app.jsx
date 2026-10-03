@@ -78,6 +78,21 @@ const STATUS_FLOW = [
   "Pedido entregue",
 ];
 const STATUS_CANCELLED = "Pedido cancelado";
+// One colour per order status, used by the client's live banner and by the
+// status badges in every panel: orange → yellow → blue → teal → purple →
+// green, with red for cancelled.
+const STATUS_COLORS = {
+  "Pedido em análise": { fg: "#D9640B", bg: "#FDEBD6" },
+  "Pedido recebido": { fg: "#A67C00", bg: "#FBF1C7" },
+  "Pedido em produção": { fg: "#1F6FB5", bg: "#DCEBF8" },
+  "Pedido concluído": { fg: "#0F8A7A", bg: "#D5F0EB" },
+  "Pedido em transporte": { fg: "#6B49C2", bg: "#E8E0F7" },
+  "Pedido entregue": { fg: "#2E7D1E", bg: "#E0F2D8" },
+  "Pedido cancelado": { fg: "#C4281C", bg: "#FCE0DE" },
+};
+function statusColor(status) {
+  return STATUS_COLORS[status] || { fg: "#444441", bg: "#F1EFE8" };
+}
 
 const PAYMENT_METHODS = ["Pix", "Cartão de crédito", "Cartão de débito", "Dinheiro"];
 
@@ -710,9 +725,12 @@ function CartIcon({ count, onClick }) {
 }
 
 function StatusBadge({ status }) {
-  if (status === STATUS_CANCELLED) return <Badge tone="red">{status}</Badge>;
-  if (status === "Pedido entregue") return <Badge tone="green">{status}</Badge>;
-  return <Badge tone="gold">{status}</Badge>;
+  const c = statusColor(status);
+  return (
+    <span style={{ background: c.bg, color: c.fg, border: "1px solid " + c.fg + "55", fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
+      {status}
+    </span>
+  );
 }
 
 // Live status tracker shown at the top of the client/reseller panel. Orders
@@ -744,18 +762,19 @@ function OrderStatusBanner({ orders, onOpen }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
-      <style>{"@keyframes mtnPulse{0%{box-shadow:0 0 0 0 rgba(196,87,122,.55)}70%{box-shadow:0 0 0 12px rgba(196,87,122,0)}100%{box-shadow:0 0 0 0 rgba(196,87,122,0)}}"}</style>
+      <style>{"@keyframes mtnPulse{0%{box-shadow:0 0 0 0 currentColor}70%{box-shadow:0 0 0 12px transparent}100%{box-shadow:0 0 0 0 transparent}}"}</style>
       {shown.map((o) => {
         const cancelled = o.status === STATUS_CANCELLED;
         const done = o.status === "Pedido entregue";
         const idx = STATUS_FLOW.indexOf(o.status);
-        const accent = cancelled ? "#C4394A" : done ? "#3B6D11" : "#C4577A";
+        const accent = statusColor(o.status).fg;
+        const pulse = statusColor(o.status).fg;
         return (
           <div
             key={o.id}
             style={{
-              border: "2px solid " + accent, borderRadius: 14, padding: 14, background: "#FFFDF9",
-              animation: flashIds[o.id] ? "mtnPulse 1.4s ease-out 5" : "none",
+              border: "2px solid " + accent, borderRadius: 14, padding: 14, background: statusColor(o.status).bg + "66",
+              color: pulse, animation: flashIds[o.id] ? "mtnPulse 1.4s ease-out 5" : "none",
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -765,7 +784,7 @@ function OrderStatusBanner({ orders, onOpen }) {
                 </div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: accent, fontFamily: "Georgia, serif" }}>
                   {cancelled ? "❌ " : done ? "✅ " : "🍫 "}{o.status}
-                  {flashIds[o.id] && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, background: "#C4577A", color: "#fff", borderRadius: 999, padding: "2px 8px", verticalAlign: "middle" }}>🔔 atualizado</span>}
+                  {flashIds[o.id] && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, background: accent, color: "#fff", borderRadius: 999, padding: "2px 8px", verticalAlign: "middle" }}>🔔 atualizado</span>}
                 </div>
               </div>
               <Btn variant="ghost" style={{ padding: "4px 12px", fontSize: 12 }} onClick={onOpen}>Ver pedido</Btn>
@@ -774,7 +793,7 @@ function OrderStatusBanner({ orders, onOpen }) {
               <div style={{ display: "flex", gap: 4, marginTop: 12 }}>
                 {STATUS_FLOW.map((st, i) => (
                   <div key={st} style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ height: 6, borderRadius: 999, background: i <= idx ? accent : "#E5E1D6" }} />
+                    <div style={{ height: 6, borderRadius: 999, background: i <= idx ? statusColor(st).fg : "#E5E1D6" }} />
                     <div style={{ fontSize: 10, marginTop: 4, textAlign: "center", color: i === idx ? accent : "#8A7A63", fontWeight: i === idx ? 700 : 400, lineHeight: 1.2 }}>
                       {st.replace("Pedido ", "")}
                     </div>

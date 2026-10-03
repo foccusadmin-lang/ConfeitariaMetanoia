@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db, googleProvider } from "./src/firebase.js";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where, arrayUnion } from "firebase/firestore";
+import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where, arrayUnion, runTransaction } from "firebase/firestore";
 import QRCode from "qrcode";
 
 const ADMIN_EMAIL = "wdgraficarapidacv@gmail.com";
@@ -422,6 +422,36 @@ async function saveOrder(order) {
   } catch (e) {
     console.error("order write error", order.id, e);
   }
+}
+// Real orders get a sequential number (Pedido 01, 02, 03…) from a counter
+// document bumped inside a transaction, so two devices can never get the
+// same number. Test orders (bell tests) are never numbered or counted, and
+// numbers of deleted orders are not reused.
+function counterDocRef() {
+  return doc(db, METANOIA_COLLECTION, "metanoia_counter");
+}
+async function nextOrderNumber() {
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(counterDocRef());
+    const n = (snap.exists() ? Number(snap.data().last) || 0 : 0) + 1;
+    tx.set(counterDocRef(), { last: n });
+    return n;
+  });
+}
+async function assignOrderNumber(order) {
+  if (order.isTest || order.number != null) return order;
+  try {
+    return { ...order, number: await nextOrderNumber() };
+  } catch (e) {
+    console.error("order number error", e);
+    return order;
+  }
+}
+async function saveOrderNumber(orderId, number) {
+  await setDoc(orderDocRef(orderId), { number }, { merge: true });
+}
+function fmtOrderNo(o) {
+  return o && o.number != null ? "Pedido " + String(o.number).padStart(2, "0") : "";
 }
 async function deleteOrderDoc(orderId) {
   try {
@@ -1591,6 +1621,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
             <Card key={o.id}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
                 <span style={{ fontSize: 12, color: "#8A7A63" }}>
+                  {o.number != null && <b style={{ color: "#3D2419" }}>{fmtOrderNo(o)} · </b>}
                   {new Date(o.date).toLocaleString("pt-BR")}{" "}
                   {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}
                 </span>
@@ -1876,8 +1907,10 @@ function ManualOrderForm({ products, mode = "antigo", onDone }) {
         order.paymentMethod = paymentMethod;
       }
       if (novo) locallyCreatedOrderIds.add(order.id);
-      await saveOrder(order);
-      setMsg(novo ? `Pedido de ${name.trim()} criado!` : `Pedido de ${em} lançado!`);
+      const numbered = await assignOrderNumber(order);
+      await saveOrder(numbered);
+      const no = fmtOrderNo(numbered);
+      setMsg((novo ? `Pedido de ${name.trim()} criado` : `Pedido de ${em} lançado`) + (no ? ` — ${no}` : "") + "!");
       setQtyByProduct({});
       if (novo) { setName(""); setEmail(""); setWhatsapp(""); setAddress(""); setNotes(""); setPaymentMethod(""); setDate(toLocalInputValue(new Date())); if (onDone) onDone(); }
     } finally {
@@ -2062,12 +2095,12 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Btn variant={showCreate ? "dark" : "primary"} onClick={() => setShowCreate((v) => !v)}>{showCreate ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos.csv", [
-              ["Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
+              ["Nº", "Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status"],
+              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório de pedidos", [
-              ["Data", "Cliente", "Itens", "Total", "Status"],
-              ...sorted.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
+              ["Nº", "Data", "Cliente", "Itens", "Total", "Status"],
+              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
             ])}>Imprimir PDF</Btn>
           </div>
         )}
@@ -2124,7 +2157,7 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
               <div style={{ display: "flex", gap: 10 }}>
                 <Avatar email={o.customerName || o.email} size={32} />
                 <div>
-                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                   <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
                   {o.notes && <div style={{ fontSize: 12, color: "#8A7A63" }}>Obs.: {o.notes}</div>}
                 </div>
@@ -2255,6 +2288,29 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
   const activeResellers = resellers.filter((r) => r.status === "ativo");
   const totalFaturado = orders.filter((o) => o.status !== STATUS_CANCELLED).reduce((s, o) => s + o.total, 0);
   const lowStock = stock.filter((s) => s.qty <= s.min);
+  const [numbering, setNumbering] = useState(false);
+  const realOrders = orders.filter((o) => !o.isTest);
+  const unnumbered = realOrders.filter((o) => o.number == null);
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const weekStart = new Date(dayStart); weekStart.setDate(dayStart.getDate() - ((now.getDay() + 6) % 7));
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const countSince = (from) => realOrders.filter((o) => new Date(o.date) >= from).length;
+  async function handleNumberOld() {
+    setNumbering(true);
+    try {
+      const todo = [...unnumbered].sort((a, b) => new Date(a.date) - new Date(b.date));
+      for (const o of todo) {
+        const n = await nextOrderNumber();
+        await saveOrderNumber(o.id, n);
+      }
+    } catch (e) {
+      console.error("numbering error", e);
+    } finally {
+      setNumbering(false);
+    }
+  }
 
   const clientsList = useMemo(() => {
     const map = {};
@@ -2304,12 +2360,29 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
       {tab === "visao" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 }}>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Faturamento total</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{fmtBRL(totalFaturado)}</div></Card>
-          <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Pedidos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{orders.length}</div></Card>
+          <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Pedidos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{realOrders.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Revendedores ativos</div><div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{activeResellers.length}</div></Card>
           <Card><div style={{ fontSize: 12, color: "#8A7A63" }}>Ingredientes em falta</div><div style={{ fontSize: 22, fontWeight: 700, color: lowStock.length ? "#C4394A" : "#3D2419" }}>{lowStock.length}</div></Card>
           <Card>
             <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Testar o aviso de novo pedido (usa o som escolhido em “⚙ Som dos avisos”)</div>
             <Btn variant="ghost" style={{ width: "100%" }} onClick={onCreateTestOrder}>🔔 Campainha de teste</Btn>
+          </Card>
+          <Card style={{ gridColumn: "1 / -1" }}>
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 8 }}>Pedidos que entraram (não conta pedidos de teste)</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 12 }}>
+              {[["Hoje", dayStart], ["Esta semana", weekStart], ["Este mês", monthStart], ["Este ano", yearStart]].map(([label, from]) => (
+                <div key={label}>
+                  <div style={{ fontSize: 12, color: "#8A7A63" }}>{label}</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: "#3D2419" }}>{countSince(from)}</div>
+                </div>
+              ))}
+            </div>
+            {unnumbered.length > 0 && (
+              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "#8A7A63" }}>{unnumbered.length} pedido(s) real(is) ainda sem número.</span>
+                <Btn variant="ghost" disabled={numbering} style={{ padding: "4px 10px", fontSize: 12 }} onClick={handleNumberOld}>{numbering ? "Numerando…" : "Numerar pedidos antigos"}</Btn>
+              </div>
+            )}
           </Card>
         </div>
       )}
@@ -2428,12 +2501,12 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <Btn variant={showCreateOrder ? "dark" : "primary"} onClick={() => setShowCreateOrder((v) => !v)}>{showCreateOrder ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos_adm.csv", [
-              ["Data", "Cliente", "Perfil", "Total", "Status"],
-              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status]),
+              ["Nº", "Data", "Cliente", "Perfil", "Total", "Status"],
+              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório geral de pedidos", [
-              ["Data", "Cliente", "Total", "Status"],
-              ...orders.map((o) => [new Date(o.date).toLocaleString("pt-BR"), orderWho(o), fmtBRL(o.total), o.status]),
+              ["Nº", "Data", "Cliente", "Total", "Status"],
+              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), fmtBRL(o.total), o.status]),
             ])}>Imprimir PDF</Btn>
           </div>
           {showCreateOrder && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreateOrder(false)} />}
@@ -2442,7 +2515,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
               <Card key={o.id}>
                 <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
                   <div>
-                    <div style={{ fontWeight: 700 }}>{orderWho(o)} {o.walkIn && <Badge tone="gold">sem cadastro</Badge>} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+                    <div style={{ fontWeight: 700 }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} {o.walkIn && <Badge tone="gold">sem cadastro</Badge>} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
                     <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -2597,7 +2670,8 @@ export default function App() {
     setLoading(true);
   }
 
-  async function handlePlaceOrder(order) {
+  async function handlePlaceOrder(rawOrder) {
+    const order = await assignOrderNumber(rawOrder);
     const next = [...orders, order];
     setOrders(next);
     await saveOrder(order);

@@ -715,6 +715,80 @@ function StatusBadge({ status }) {
   return <Badge tone="gold">{status}</Badge>;
 }
 
+// Live status tracker shown at the top of the client/reseller panel. Orders
+// come from a Firestore listener, so it updates by itself the moment the
+// fabricante changes a status; a status that changes while the panel is open
+// also pulses with an "atualizado" tag for a few seconds.
+function OrderStatusBanner({ orders, onOpen }) {
+  const [flashIds, setFlashIds] = useState({});
+  const prev = useRef(null);
+  const sig = orders.map((o) => o.id + "|" + o.status).join(",");
+  useEffect(() => {
+    const cur = Object.fromEntries(orders.map((o) => [o.id, o.status]));
+    if (prev.current) {
+      const changed = orders.filter((o) => prev.current[o.id] && prev.current[o.id] !== o.status).map((o) => o.id);
+      if (changed.length) {
+        setFlashIds((f) => ({ ...f, ...Object.fromEntries(changed.map((id) => [id, true])) }));
+        setTimeout(() => setFlashIds((f) => { const n = { ...f }; changed.forEach((id) => delete n[id]); return n; }), 8000);
+      }
+    }
+    prev.current = cur;
+  }, [sig]);
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const shown = orders.filter((o) => {
+    if (o.status !== "Pedido entregue" && o.status !== STATUS_CANCELLED) return true;
+    return o.statusUpdatedAt && Date.now() - new Date(o.statusUpdatedAt).getTime() < DAY;
+  });
+  if (shown.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+      <style>{"@keyframes mtnPulse{0%{box-shadow:0 0 0 0 rgba(196,87,122,.55)}70%{box-shadow:0 0 0 12px rgba(196,87,122,0)}100%{box-shadow:0 0 0 0 rgba(196,87,122,0)}}"}</style>
+      {shown.map((o) => {
+        const cancelled = o.status === STATUS_CANCELLED;
+        const done = o.status === "Pedido entregue";
+        const idx = STATUS_FLOW.indexOf(o.status);
+        const accent = cancelled ? "#C4394A" : done ? "#3B6D11" : "#C4577A";
+        return (
+          <div
+            key={o.id}
+            style={{
+              border: "2px solid " + accent, borderRadius: 14, padding: 14, background: "#FFFDF9",
+              animation: flashIds[o.id] ? "mtnPulse 1.4s ease-out 5" : "none",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 12, color: "#8A7A63" }}>
+                  {o.number != null ? fmtOrderNo(o) + " · " : "Seu pedido · "}{new Date(o.date).toLocaleString("pt-BR")}
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: accent, fontFamily: "Georgia, serif" }}>
+                  {cancelled ? "❌ " : done ? "✅ " : "🍫 "}{o.status}
+                  {flashIds[o.id] && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, background: "#C4577A", color: "#fff", borderRadius: 999, padding: "2px 8px", verticalAlign: "middle" }}>🔔 atualizado</span>}
+                </div>
+              </div>
+              <Btn variant="ghost" style={{ padding: "4px 12px", fontSize: 12 }} onClick={onOpen}>Ver pedido</Btn>
+            </div>
+            {!cancelled && idx >= 0 && (
+              <div style={{ display: "flex", gap: 4, marginTop: 12 }}>
+                {STATUS_FLOW.map((st, i) => (
+                  <div key={st} style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ height: 6, borderRadius: 999, background: i <= idx ? accent : "#E5E1D6" }} />
+                    <div style={{ fontSize: 10, marginTop: 4, textAlign: "center", color: i === idx ? accent : "#8A7A63", fontWeight: i === idx ? 700 : 400, lineHeight: 1.2 }}>
+                      {st.replace("Pedido ", "")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Header({ email, role, photoURL, onLogout }) {
   const roleLabel = {
     cliente: "Painel do cliente",
@@ -1436,6 +1510,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
 
   return (
     <div>
+      <OrderStatusBanner orders={myOrders} onOpen={() => setTab("pedidos")} />
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18, gap: 10 }}>
         <CartIcon count={cartItems.reduce((s, [, q]) => s + q, 0)} onClick={() => setShowCartModal(true)} />
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -2693,13 +2768,13 @@ export default function App() {
   }
 
   async function handleUpdateStatus(orderId, status) {
-    const next = orders.map((o) => (o.id === orderId ? { ...o, status } : o));
+    const next = orders.map((o) => (o.id === orderId ? { ...o, status, statusUpdatedAt: new Date().toISOString() } : o));
     setOrders(next);
     await saveOrder(next.find((o) => o.id === orderId));
   }
 
   async function handleConfirmDelivery(orderId, photoDataUrl) {
-    const next = orders.map((o) => (o.id === orderId ? { ...o, status: "Pedido entregue", deliveryPhoto: photoDataUrl } : o));
+    const next = orders.map((o) => (o.id === orderId ? { ...o, status: "Pedido entregue", statusUpdatedAt: new Date().toISOString(), deliveryPhoto: photoDataUrl } : o));
     setOrders(next);
     await saveOrder(next.find((o) => o.id === orderId));
   }

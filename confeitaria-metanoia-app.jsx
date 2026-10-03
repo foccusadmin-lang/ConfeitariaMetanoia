@@ -1381,6 +1381,13 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [tab, setTab] = useState("loja");
   const [showCartModal, setShowCartModal] = useState(false);
   const [showInvestModal, setShowInvestModal] = useState(false);
+  const [photoView, setPhotoView] = useState(null); // { src, name } for the full-size brownie photo
+  useEffect(() => {
+    if (!photoView) return;
+    const onKey = (e) => { if (e.key === "Escape") setPhotoView(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [photoView]);
   const [pixQrImage, setPixQrImage] = useState(null);
   const [orderType, setOrderType] = useState("novo"); // "novo" | "reposicao" (revenda only)
 
@@ -1570,11 +1577,16 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
             {activeProducts.map((p) => (
               <Card key={p.id}>
                 {FLAVOR_IMAGES[p.flavor] ? (
-                  <img
-                    src={FLAVOR_IMAGES[p.flavor]}
-                    alt={`Brownie ${p.flavor}`}
-                    style={{ width: "100%", height: 90, borderRadius: 10, marginBottom: 10, objectFit: "cover" }}
-                  />
+                  <div style={{ position: "relative", marginBottom: 10 }}>
+                    <img
+                      src={FLAVOR_IMAGES[p.flavor]}
+                      alt={`Brownie ${p.flavor}`}
+                      title="Clique para ver a foto inteira"
+                      onClick={() => setPhotoView({ src: FLAVOR_IMAGES[p.flavor], name: `Brownie ${p.flavor}` })}
+                      style={{ display: "block", width: "100%", height: 90, borderRadius: 10, objectFit: "cover", cursor: "zoom-in" }}
+                    />
+                    <span style={{ position: "absolute", right: 6, bottom: 6, background: "rgba(61,36,25,.65)", color: "#fff", fontSize: 11, borderRadius: 999, padding: "2px 8px", pointerEvents: "none" }}>🔍 ampliar</span>
+                  </div>
                 ) : (
                   <div style={{ width: "100%", height: 90, borderRadius: 10, background: FLAVOR_COLORS[p.flavor], marginBottom: 10 }} />
                 )}
@@ -1763,6 +1775,26 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
           </div>
           <ChatThread messages={myChat && myChat.messages} onSend={(text) => onSendChatMessage(email, "cliente", email, text)} />
         </Card>
+      )}
+
+      {photoView && (
+        <div
+          onClick={() => setPhotoView(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(20,10,5,0.88)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 1100, padding: 16, cursor: "zoom-out" }}
+        >
+          <img
+            src={photoView.src}
+            alt={photoView.name}
+            style={{ maxWidth: "100%", maxHeight: "82vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 8px 40px rgba(0,0,0,.5)" }}
+          />
+          <div style={{ color: "#fff", marginTop: 12, fontFamily: "Georgia, serif", fontSize: 18 }}>{photoView.name}</div>
+          <div style={{ color: "#D3C7B8", fontSize: 12, marginTop: 4 }}>Toque em qualquer lugar ou pressione Esc para fechar</div>
+          <button
+            onClick={() => setPhotoView(null)}
+            aria-label="Fechar foto"
+            style={{ position: "absolute", top: 14, right: 14, border: "none", background: "rgba(255,255,255,.18)", color: "#fff", fontSize: 22, width: 40, height: 40, borderRadius: 999, cursor: "pointer" }}
+          >×</button>
+        </div>
       )}
 
       {showCartModal && (

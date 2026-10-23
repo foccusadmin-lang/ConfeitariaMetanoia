@@ -960,6 +960,91 @@ function OrderStatusBanner({ orders, onOpen }) {
   );
 }
 
+// ---- Install as app (PWA) ----
+// The browser fires beforeinstallprompt early, usually before React mounts,
+// so it is captured at module load and handed to whichever button is shown.
+let deferredInstallPrompt = null;
+const installListeners = new Set();
+function notifyInstall() { installListeners.forEach((fn) => fn()); }
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    notifyInstall();
+  });
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    notifyInstall();
+  });
+}
+function isStandalone() {
+  if (typeof window === "undefined") return false;
+  return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
+}
+
+function InstallButton() {
+  const [, force] = useState(0);
+  const [showHelp, setShowHelp] = useState(false);
+  useEffect(() => {
+    const fn = () => force((n) => n + 1);
+    installListeners.add(fn);
+    return () => installListeners.delete(fn);
+  }, []);
+  if (isStandalone()) return null;
+
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const isIOS = /iphone|ipad|ipod/i.test(ua) || (/Macintosh/i.test(ua) && typeof navigator !== "undefined" && navigator.maxTouchPoints > 1);
+
+  async function handleClick() {
+    if (deferredInstallPrompt) {
+      const evt = deferredInstallPrompt;
+      deferredInstallPrompt = null;
+      evt.prompt();
+      try { await evt.userChoice; } catch (e) { /* user dismissed */ }
+      notifyInstall();
+    } else {
+      setShowHelp(true);
+    }
+  }
+
+  return (
+    <>
+      <Btn variant="ghost" onClick={handleClick} title="Instalar o aplicativo no seu aparelho" style={{ padding: "6px 14px", fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3D2419" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 3v12" /><path d="M7 11l5 5 5-5" /><path d="M5 20h14" />
+        </svg>
+        Instalar app
+      </Btn>
+      {showHelp && (
+        <div
+          onClick={() => setShowHelp(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(61,36,25,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#FAF4EC", borderRadius: 16, padding: 20, maxWidth: 360, width: "100%", boxShadow: "0 8px 30px rgba(0,0,0,.25)" }}>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 20, fontWeight: 700, color: "#3D2419", marginBottom: 8 }}>Instalar o app Metanoia</div>
+            {isIOS ? (
+              <ol style={{ fontSize: 14, color: "#3D2419", paddingLeft: 20, lineHeight: 1.6, margin: "0 0 12px" }}>
+                <li>Abra este site no <b>Safari</b>.</li>
+                <li>Toque no botão <b>Compartilhar</b> (quadrado com seta para cima).</li>
+                <li>Escolha <b>“Adicionar à Tela de Início”</b>.</li>
+                <li>Toque em <b>Adicionar</b>.</li>
+              </ol>
+            ) : (
+              <ol style={{ fontSize: 14, color: "#3D2419", paddingLeft: 20, lineHeight: 1.6, margin: "0 0 12px" }}>
+                <li>Abra este site no <b>Chrome</b> ou <b>Edge</b>.</li>
+                <li>Abra o menu do navegador (<b>⋮</b> ou <b>…</b>).</li>
+                <li>Toque em <b>“Instalar app”</b> ou <b>“Adicionar à tela inicial”</b>.</li>
+              </ol>
+            )}
+            <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 14 }}>O app abre em tela cheia, sem barra do navegador, e fica com o ícone na tela inicial.</div>
+            <Btn style={{ width: "100%" }} onClick={() => setShowHelp(false)}>Entendi</Btn>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Header({ email, role, photoURL, onLogout }) {
   const roleLabel = {
     cliente: "Painel do cliente",
@@ -984,6 +1069,7 @@ function Header({ email, role, photoURL, onLogout }) {
           </svg>
           Indicar
         </Btn>
+        <InstallButton />
         <Btn variant="ghost" onClick={onLogout} style={{ padding: "6px 14px", fontSize: 13 }}>Sair</Btn>
       </div>
     </div>

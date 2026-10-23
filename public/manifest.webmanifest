@@ -1,0 +1,16 @@
+{
+  "name": "Confeitaria Metanoia",
+  "short_name": "Metanoia",
+  "description": "Brownies artesanais — pedidos e acompanhamento",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FAF4EC",
+  "theme_color": "#3D2419",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -484,6 +484,18 @@ async function saveOrderReturns(order, returnedByIdx) {
   };
   await setDoc(orderDocRef(order.id), patch, { merge: true });
 }
+// How an order is being paid, in one label (consignado wins over any method).
+function paymentLabel(o) {
+  if (o.paymentType === "consignado") return "Consignado";
+  return o.paymentMethod || "";
+}
+const PAYMENT_COLORS = {
+  "Pix": { fg: "#0B7A75", bg: "#D5F0EE" },
+  "Cartão de crédito": { fg: "#1F6FB5", bg: "#DCEBF8" },
+  "Cartão de débito": { fg: "#4B4FB8", bg: "#E1E2F7" },
+  "Dinheiro": { fg: "#2E7D1E", bg: "#E0F2D8" },
+  "Consignado": { fg: "#B35A00", bg: "#FDEBD6" },
+};
 function fmtOrderNo(o) {
   return o && o.number != null ? "Pedido " + String(o.number).padStart(2, "0") : "";
 }
@@ -748,6 +760,44 @@ function StatusBadge({ status }) {
   return (
     <span style={{ background: c.bg, color: c.fg, border: "1px solid " + c.fg + "55", fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
       {status}
+    </span>
+  );
+}
+
+// Shows how the order is paid (Pix, crédito, débito, dinheiro, consignado).
+// Staff cards pass editable so an order with no recorded method can be set.
+function PaymentBadge({ order, editable }) {
+  const label = paymentLabel(order);
+  if (order.isTest) return null;
+  if (!label) {
+    if (!editable) return <span style={{ fontSize: 12, color: "#8A7A63" }}>💳 pagamento não informado</span>;
+    return (
+      <select
+        defaultValue=""
+        aria-label="Definir forma de pagamento"
+        onChange={async (e) => {
+          const v = e.target.value;
+          if (!v) return;
+          if (v === "Consignado") {
+            const due = new Date(order.date);
+            due.setDate(due.getDate() + RESELLER_PAYMENT_DAYS);
+            await setDoc(orderDocRef(order.id), { paymentType: "consignado", paymentStatus: "pendente", paymentDueDate: due.toISOString() }, { merge: true });
+          } else {
+            await setDoc(orderDocRef(order.id), { paymentMethod: v }, { merge: true });
+          }
+        }}
+        style={{ fontSize: 12, padding: "3px 6px", borderRadius: 999, border: "1px dashed #C4577A", background: "#fff", color: "#8A7A63" }}
+      >
+        <option value="">💳 Definir pagamento…</option>
+        {PAYMENT_METHODS.map((pm) => <option key={pm} value={pm}>{pm}</option>)}
+        <option value="Consignado">Consignado (7 dias)</option>
+      </select>
+    );
+  }
+  const c = PAYMENT_COLORS[label] || { fg: "#444441", bg: "#F1EFE8" };
+  return (
+    <span style={{ background: c.bg, color: c.fg, border: "1px solid " + c.fg + "55", fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
+      💳 {label}
     </span>
   );
 }
@@ -1833,7 +1883,10 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                   {new Date(o.date).toLocaleString("pt-BR")}{" "}
                   {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}
                 </span>
-                <StatusBadge status={o.status} />
+                <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <StatusBadge status={o.status} />
+                  <PaymentBadge order={o} />
+                </span>
               </div>
               <div style={{ fontSize: 13 }}>
                 {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor}{it.customBand ? " · cinta personalizada" : ""}</div>)}
@@ -2328,12 +2381,12 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Btn variant={showCreate ? "dark" : "primary"} onClick={() => setShowCreate((v) => !v)}>{showCreate ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos.csv", [
-              ["Nº", "Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status"],
-              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status]),
+              ["Nº", "Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status", "Pagamento"],
+              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status, paymentLabel(o)]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório de pedidos", [
-              ["Nº", "Data", "Cliente", "Itens", "Total", "Status"],
-              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status]),
+              ["Nº", "Data", "Cliente", "Itens", "Total", "Status", "Pagamento"],
+              ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.items.map(itemLabel).join("; "), fmtBRL(o.total), o.status, paymentLabel(o)]),
             ])}>Imprimir PDF</Btn>
           </div>
         )}
@@ -2395,7 +2448,10 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
                   {o.notes && <div style={{ fontSize: 12, color: "#8A7A63" }}>Obs.: {o.notes}</div>}
                 </div>
               </div>
-              <StatusBadge status={o.status} />
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                <StatusBadge status={o.status} />
+                <PaymentBadge order={o} editable />
+              </div>
             </div>
             <div style={{ fontSize: 13, marginBottom: 8 }}>
               {o.items.map((it, i) => (
@@ -2736,12 +2792,12 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <Btn variant={showCreateOrder ? "dark" : "primary"} onClick={() => setShowCreateOrder((v) => !v)}>{showCreateOrder ? "Fechar" : "+ Criar pedido"}</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos_adm.csv", [
-              ["Nº", "Data", "Cliente", "Perfil", "Total", "Status"],
-              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status]),
+              ["Nº", "Data", "Cliente", "Perfil", "Total", "Status", "Pagamento"],
+              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status, paymentLabel(o)]),
             ])}>Exportar XLSX/CSV</Btn>
             <Btn variant="ghost" onClick={() => printReport("Relatório geral de pedidos", [
-              ["Nº", "Data", "Cliente", "Total", "Status"],
-              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), fmtBRL(o.total), o.status]),
+              ["Nº", "Data", "Cliente", "Total", "Status", "Pagamento"],
+              ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), fmtBRL(o.total), o.status, paymentLabel(o)]),
             ])}>Imprimir PDF</Btn>
           </div>
           {showCreateOrder && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreateOrder(false)} />}
@@ -2755,6 +2811,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <StatusBadge status={o.status} />
+                    <PaymentBadge order={o} editable />
                     {o.paymentType === "consignado" && (
                       <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
                     )}

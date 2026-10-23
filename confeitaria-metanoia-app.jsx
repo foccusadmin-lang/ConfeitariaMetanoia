@@ -465,6 +465,25 @@ async function assignOrderNumber(order) {
 async function saveOrderNumber(orderId, number) {
   await setDoc(orderDocRef(orderId), { number }, { merge: true });
 }
+// Devoluções / acerto: when staff visit a client (usually a consigned
+// reseller) and take back what wasn't sold, the returned units are recorded
+// per item, the order total is reduced by their value and the original total
+// is kept so nothing is lost. Safe to redo: it always recomputes from the
+// original total, and only the changed fields are merged into the document.
+async function saveOrderReturns(order, returnedByIdx) {
+  const items = order.items.map((it, i) => ({ ...it, returned: returnedByIdx[i] || 0 }));
+  const originalTotal = order.originalTotal != null ? order.originalTotal : order.total;
+  const returnedValue = items.reduce((s, it) => s + it.returned * it.unitPrice, 0);
+  const returnedUnits = items.reduce((s, it) => s + it.returned, 0);
+  const total = Math.max(0, Math.round((originalTotal - returnedValue) * 100) / 100);
+  const prevUnits = order.returnedUnits || 0;
+  const prevValue = order.returnedValue || 0;
+  const patch = {
+    items, total, originalTotal, returnedUnits, returnedValue,
+    returnLog: [...(order.returnLog || []), { at: new Date().toISOString(), units: returnedUnits - prevUnits, value: returnedValue - prevValue }],
+  };
+  await setDoc(orderDocRef(order.id), patch, { merge: true });
+}
 function fmtOrderNo(o) {
   return o && o.number != null ? "Pedido " + String(o.number).padStart(2, "0") : "";
 }
@@ -730,6 +749,89 @@ function StatusBadge({ status }) {
     <span style={{ background: c.bg, color: c.fg, border: "1px solid " + c.fg + "55", fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
       {status}
     </span>
+  );
+}
+
+// "Devolução / acerto" control used on staff order cards (fabricante + adm).
+function ReturnsControl({ order }) {
+  const [open, setOpen] = useState(false);
+  const [vals, setVals] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  if (order.isTest || order.status === STATUS_CANCELLED) return null;
+
+  const hasReturns = (order.returnedUnits || 0) > 0;
+  const original = order.originalTotal != null ? order.originalTotal : order.total;
+  const returnedNow = (it, i) => (vals[i] !== undefined ? vals[i] : String(it.returned || 0));
+  const parsed = order.items.map((it, i) => Math.floor(Number(returnedNow(it, i)) || 0));
+  const bad = order.items.some((it, i) => parsed[i] < 0 || parsed[i] > it.qty);
+  const newValue = order.items.reduce((s, it, i) => s + parsed[i] * it.unitPrice, 0);
+  const newTotal = Math.max(0, original - newValue);
+  const sentUnits = order.items.reduce((s, it) => s + it.qty, 0);
+  const newUnits = parsed.reduce((s, n) => s + n, 0);
+
+  function start() {
+    setVals({});
+    setErr("");
+    setOpen(true);
+  }
+  async function handleSave() {
+    if (bad) { setErr("A quantidade devolvida não pode ser negativa nem maior que a enviada."); return; }
+    setSaving(true);
+    try {
+      await saveOrderReturns(order, parsed);
+      setOpen(false);
+    } catch (e) {
+      console.error("returns error", e);
+      setErr("Não foi possível salvar. Tente de novo.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      {hasReturns && (
+        <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 6 }}>
+          ↩ Devolvidos: <b>{order.returnedUnits} un.</b> · abatido <b>{fmtBRL(order.returnedValue || 0)}</b> do valor original {fmtBRL(original)} → <b style={{ color: "#3D2419" }}>a receber {fmtBRL(order.total)}</b>
+        </div>
+      )}
+      {!open && <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={start}>↩ {hasReturns ? "Editar devolução / acerto" : "Devolução / acerto"}</Btn>}
+      {open && (
+        <div style={{ border: "1px dashed #C4577A", borderRadius: 10, padding: 12, background: "#FFF8FA" }}>
+          <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 4 }}>Devolução / acerto</div>
+          <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 10 }}>
+            Informe quantos brownies de cada sabor voltaram (não vendidos). O valor deles é abatido do pedido.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 8, marginBottom: 10 }}>
+            {order.items.map((it, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, border: "1px solid #D3D1C7", borderRadius: 8, padding: "6px 8px", background: "#fff" }}>
+                <span>
+                  {it.flavor}{it.customBand ? " (cinta)" : ""}
+                  <span style={{ color: "#8A7A63", fontSize: 12 }}> · enviados {it.qty}</span>
+                </span>
+                <input
+                  type="number" min={0} max={it.qty}
+                  value={returnedNow(it, i)}
+                  onChange={(e) => setVals((v) => ({ ...v, [i]: e.target.value }))}
+                  style={{ width: 56, padding: 4, borderRadius: 6, border: "1px solid " + (parsed[i] > it.qty || parsed[i] < 0 ? "#C4394A" : "#D3D1C7") }}
+                  aria-label={"Devolvidos " + it.flavor}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, marginBottom: 8 }}>
+            Enviados: <b>{sentUnits}</b> · Devolvidos: <b>{newUnits}</b> · Ficam com o cliente: <b>{sentUnits - newUnits}</b><br />
+            Valor original {fmtBRL(original)} − devolução {fmtBRL(newValue)} = <b style={{ color: "#3D2419" }}>a receber {fmtBRL(newTotal)}</b>
+          </div>
+          {err && <div style={{ color: "#C4394A", fontSize: 12, marginBottom: 8 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn disabled={saving} onClick={handleSave}>{saving ? "Salvando…" : "Salvar acerto"}</Btn>
+            <Btn variant="ghost" onClick={() => setOpen(false)}>Cancelar</Btn>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1737,6 +1839,11 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 {o.items.map((it, i) => <div key={i}>{it.qty}x Brownie {it.flavor}{it.customBand ? " · cinta personalizada" : ""}</div>)}
               </div>
               <div style={{ fontWeight: 700, marginTop: 6 }}>{fmtBRL(o.total)}</div>
+              {(o.returnedUnits || 0) > 0 && (
+                <div style={{ fontSize: 12, color: "#8A7A63", marginTop: 4 }}>
+                  ↩ {o.returnedUnits} un. devolvida(s) · abatido {fmtBRL(o.returnedValue || 0)} do valor original {fmtBRL(o.originalTotal != null ? o.originalTotal : o.total)}
+                </div>
+              )}
               {o.paymentMethod === "Pix" && o.paymentProof && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
                   <img src={o.paymentProof} alt="Comprovante Pix" style={{ width: 36, height: 36, borderRadius: 6, objectFit: "cover" }} />
@@ -2294,11 +2401,13 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
               {o.items.map((it, i) => (
                 <div key={i}>
                   {it.qty}x Brownie {it.flavor} — {fmtBRL(it.unitPrice)}
+                  {it.returned > 0 && <span style={{ color: "#C4577A" }}> · ↩ {it.returned} devolvido(s)</span>}
                   {it.customBand && <> <Badge tone="rose">cinta personalizada</Badge></>}
                 </div>
               ))}
             </div>
             <div style={{ fontWeight: 700, marginBottom: 8 }}>{fmtBRL(o.total)}</div>
+            <ReturnsControl order={o} />
             {o.deliveryPhoto && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <img src={o.deliveryPhoto} alt="Foto da entrega" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
@@ -2655,6 +2764,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
                     <Btn variant="danger" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
                   </div>
                 </div>
+                <ReturnsControl order={o} />
               </Card>
             ))}
           </div>

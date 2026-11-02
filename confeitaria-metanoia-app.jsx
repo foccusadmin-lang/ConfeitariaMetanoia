@@ -2533,6 +2533,7 @@ function OrderCard({ o, open, onToggle, onUpdateStatus, onDeleteOrder, onMarkPay
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
           <StatusBadge status={o.status} />
           <PaymentBadge order={o} editable />
+          <Btn variant="ghost" style={{ padding: "3px 10px", fontSize: 12 }} onClick={onToggle}>▴ Ocultar detalhes</Btn>
         </div>
       </div>
       <div style={{ fontSize: 13, marginBottom: 8 }}>
@@ -2582,6 +2583,7 @@ function OrderCard({ o, open, onToggle, onUpdateStatus, onDeleteOrder, onMarkPay
           {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
         <Btn variant="danger" style={{ padding: "8px 14px", fontSize: 13 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
+        <Btn variant="ghost" style={{ padding: "8px 14px", fontSize: 13 }} onClick={onToggle}>▴ Ocultar detalhes</Btn>
       </div>
     </Card>
   );

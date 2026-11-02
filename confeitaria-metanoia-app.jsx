@@ -254,19 +254,19 @@ function buildPixCode(amount, txid) {
 }
 async function shareApp() {
   const shareData = {
-    title: "Doceria Metanoia",
-    text: "Conheça a Doceria Metanoia — brownies artesanais!",
-    url: window.location.origin,
+    title: "Confeitaria Metanoia",
+    text: "Conheça a Confeitaria Metanoia — brownies artesanais que tem abençoado vidas através da *Associação EVVULD!*",
+    url: window.location.origin + "/",
   };
   if (navigator.share) {
     try { await navigator.share(shareData); return; }
     catch (e) { if (e && e.name === "AbortError") return; }
   }
   try {
-    await navigator.clipboard.writeText(shareData.url);
-    alert("Link copiado! É só colar e enviar pra quem você quiser indicar.");
+    await navigator.clipboard.writeText(shareData.text + " " + shareData.url);
+    alert("Mensagem copiada! É só colar e enviar pra quem você quiser indicar.");
   } catch (e) {
-    window.prompt("Copie o link para indicar:", shareData.url);
+    window.prompt("Copie a mensagem para indicar:", shareData.text + " " + shareData.url);
   }
 }
 function speakAlert(text) {

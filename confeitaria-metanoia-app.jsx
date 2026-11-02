@@ -53,6 +53,19 @@ const DEFAULT_PRODUCTS = Object.keys(FLAVOR_COLORS).map((flavor, i) => ({
   active: true,
 }));
 
+// Each product can carry its own prices (priceCliente / priceRevenda), edited
+// by adm/fabricante; products without one fall back to the standard prices.
+// Orders already placed keep the unit price they were sold at.
+function productPrice(p, role) {
+  const v = p ? (role === "revenda" ? p.priceRevenda : p.priceCliente) : null;
+  if (typeof v === "number" && v > 0) return v;
+  return role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
+}
+function parsePriceInput(txt) {
+  const n = Number(String(txt).trim().replace(/[^\d,.-]/g, "").replace(",", "."));
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : NaN;
+}
+
 const DEFAULT_STOCK = [
   { id: "i1", name: "Chocolate em gotas Harald Top meio amargo", qty: 40, unit: "kg", min: 10 },
   { id: "i2", name: "Chocolate em pó Sicao 50%", qty: 25, unit: "kg", min: 8 },
@@ -1629,7 +1642,6 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const [pixQrImage, setPixQrImage] = useState(null);
   const [orderType, setOrderType] = useState("novo"); // "novo" | "reposicao" (revenda only)
 
-  const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const activeProducts = products.filter((p) => p.active);
   const cartItems = Object.entries(cart).filter(([, q]) => q > 0);
   // Flavors whose custom-band art is ready: only those can be ordered with
@@ -1638,7 +1650,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   function lineInfo(key) {
     const { productId, custom } = parseLineKey(key);
     const product = products.find((pr) => pr.id === productId);
-    return { productId, custom, product, unit: price + (custom ? CINTA_PRINT_UNIT : 0) };
+    return { productId, custom, product, unit: productPrice(product, role) + (custom ? CINTA_PRINT_UNIT : 0) };
   }
   const total = cartItems.reduce((s, [key, q]) => s + q * lineInfo(key).unit, 0);
   const totalUnits = cartItems.reduce((s, [, q]) => s + q, 0);
@@ -1831,7 +1843,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                 <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 2 }}>Brownie {p.flavor}</div>
                 <div style={{ fontSize: 13, color: "#8A7A63", marginBottom: 10 }}>70g</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontWeight: 700, color: "#C4577A" }}>{fmtBRL(price)}</span>
+                  <span style={{ fontWeight: 700, color: "#C4577A" }}>{fmtBRL(productPrice(p, role))}</span>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id, -1)}>-</Btn>
                     <span style={{ minWidth: 16, textAlign: "center" }}>{cart[p.id] || 0}</span>
@@ -1842,7 +1854,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed #E4E1D6", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 12, color: "#5F5E5A" }}>
                       Com cinta personalizada<br />
-                      <strong style={{ color: "#C4577A" }}>{fmtBRL(price + CINTA_PRINT_UNIT)}</strong> un.
+                      <strong style={{ color: "#C4577A" }}>{fmtBRL(productPrice(p, role) + CINTA_PRINT_UNIT)}</strong> un.
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id + "#c", -1)}>-</Btn>
@@ -2230,9 +2242,8 @@ function ManualOrderForm({ products, mode = "antigo", onDone }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  const price = role === "revenda" ? PRICE_REVENDA : PRICE_CLIENTE;
   const items = products.filter((p) => Number(qtyByProduct[p.id]) > 0).map((p) => ({
-    productId: p.id, flavor: p.flavor, qty: Number(qtyByProduct[p.id]), unitPrice: price,
+    productId: p.id, flavor: p.flavor, qty: Number(qtyByProduct[p.id]), unitPrice: productPrice(p, role),
   }));
   const total = items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
   const consignado = paymentMethod === "Consignado (7 dias)";
@@ -2655,6 +2666,57 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
+// One row of the Produtos tab: on/off switch plus editable prices.
+function ProductRow({ p, products, onToggleProduct }) {
+  const curCli = productPrice(p, "cliente");
+  const curRev = productPrice(p, "revenda");
+  const [cli, setCli] = useState(curCli.toFixed(2).replace(".", ","));
+  const [rev, setRev] = useState(curRev.toFixed(2).replace(".", ","));
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  // follow changes made from another device/panel
+  useEffect(() => { setCli(curCli.toFixed(2).replace(".", ",")); }, [curCli]);
+  useEffect(() => { setRev(curRev.toFixed(2).replace(".", ",")); }, [curRev]);
+
+  const nCli = parsePriceInput(cli);
+  const nRev = parsePriceInput(rev);
+  const changed = nCli !== curCli || nRev !== curRev;
+  const inputStyle = { width: 78, padding: 6, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box" };
+
+  async function handleSave() {
+    if (!(nCli > 0 && nCli <= 9999) || !(nRev > 0 && nRev <= 9999)) { setErr("Informe valores maiores que zero (ex.: 12,00)."); setMsg(""); return; }
+    setErr(""); setSaving(true);
+    try {
+      const next = products.map((x) => (x.id === p.id ? { ...x, priceCliente: nCli, priceRevenda: nRev } : x));
+      await save("metanoia_products", next);
+      setMsg("Preço salvo!");
+      setTimeout(() => setMsg(""), 3000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ borderBottom: "1px solid #EFEBDF", paddingBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, flexWrap: "wrap", gap: 8 }}>
+        <span style={{ fontWeight: 700, color: "#3D2419" }}>Brownie {p.flavor}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Badge tone={p.active ? "green" : "gray"}>{p.active ? "ativo" : "inativo"}</Badge>
+          <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onToggleProduct(p.id)}>{p.active ? "Desativar" : "Ativar"}</Btn>
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: "#5F5E5A" }}>
+        <label>Preço cliente (R$) <input value={cli} onChange={(e) => setCli(e.target.value)} inputMode="decimal" style={inputStyle} aria-label={"Preço cliente " + p.flavor} /></label>
+        <label>Preço revenda (R$) <input value={rev} onChange={(e) => setRev(e.target.value)} inputMode="decimal" style={inputStyle} aria-label={"Preço revenda " + p.flavor} /></label>
+        <Btn disabled={!changed || saving} style={{ padding: "6px 14px", fontSize: 12 }} onClick={handleSave}>{saving ? "Salvando…" : "Salvar preço"}</Btn>
+        {msg && <span style={{ color: "#27500A" }}>{msg}</span>}
+        {err && <span style={{ color: "#C4394A" }}>{err}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cintaArts, currentEmail, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onUpdateStatus, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("visao");
   const [clientSearch, setClientSearch] = useState("");
@@ -2860,14 +2922,11 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
       {tab === "produtos" && (
         <Card>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 12, color: "#8A7A63" }}>
+              Altere o preço de cada sabor para cliente final e para revenda. A mudança vale para os próximos pedidos; pedidos já feitos mantêm o valor em que foram vendidos.
+            </div>
             {products.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13 }}>
-                <span>Brownie {p.flavor}</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <Badge tone={p.active ? "green" : "gray"}>{p.active ? "ativo" : "inativo"}</Badge>
-                  <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onToggleProduct(p.id)}>{p.active ? "Desativar" : "Ativar"}</Btn>
-                </div>
-              </div>
+              <ProductRow key={p.id} p={p} products={products} onToggleProduct={onToggleProduct} />
             ))}
           </div>
         </Card>

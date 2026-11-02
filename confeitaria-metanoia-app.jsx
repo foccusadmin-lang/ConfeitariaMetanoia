@@ -2476,6 +2476,77 @@ function BellToggle({ role }) {
 }
 
 // ---------- Fabricante ----------
+// Full order card shared by the Fabricante and Adm "Pedidos" tabs, so both
+// panels show the same details and controls.
+function OrderCard({ o, onUpdateStatus, onDeleteOrder, onMarkPaymentReceived }) {
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Avatar email={o.customerName || o.email} size={32} />
+          <div>
+            <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+            <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
+            {o.notes && <div style={{ fontSize: 12, color: "#8A7A63" }}>Obs.: {o.notes}</div>}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          <StatusBadge status={o.status} />
+          <PaymentBadge order={o} editable />
+        </div>
+      </div>
+      <div style={{ fontSize: 13, marginBottom: 8 }}>
+        {o.items.map((it, i) => (
+          <div key={i}>
+            {it.qty}x Brownie {it.flavor} — {fmtBRL(it.unitPrice)}
+            {it.returned > 0 && <span style={{ color: "#C4577A" }}> · ↩ {it.returned} devolvido(s)</span>}
+            {it.customBand && <> <Badge tone="rose">cinta personalizada</Badge></>}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontWeight: 700, marginBottom: 8 }}>{fmtBRL(o.total)}</div>
+      <ReturnsControl order={o} />
+      {o.deliveryPhoto && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <img src={o.deliveryPhoto} alt="Foto da entrega" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
+          <span style={{ fontSize: 12, color: "#8A7A63" }}>Foto de confirmação enviada pelo cliente</span>
+        </div>
+      )}
+      {o.paymentMethod === "Pix" && o.paymentProof && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <img src={o.paymentProof} alt="Comprovante Pix" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
+          <span style={{ fontSize: 12, color: "#8A7A63" }}>Comprovante Pix do cliente</span>
+        </div>
+      )}
+      {o.paymentType === "consignado" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "#8A7A63" }}>Consignado · vence em {new Date(o.paymentDueDate).toLocaleDateString("pt-BR")}</span>
+          <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
+          {o.paymentStatus !== "pago" && (
+            <Btn variant="ghost" style={{ padding: "2px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
+          )}
+        </div>
+      )}
+      {o.salesReport && (
+        <div style={{ marginBottom: 8, fontSize: 12, color: "#8A7A63" }}>
+          <div style={{ fontWeight: 700, color: "#3D2419" }}>Vendas informadas pelo revendedor</div>
+          {o.salesReport.items.map((it) => <div key={it.lineKey || it.productId}>{it.flavor}{it.customBand ? " (cinta personalizada)" : ""}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <select
+          value={o.status}
+          onChange={(e) => onUpdateStatus(o.id, e.target.value)}
+          style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }}
+        >
+          {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <Btn variant="danger" style={{ padding: "8px 14px", fontSize: 13 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
+      </div>
+    </Card>
+  );
+}
+
 function Fabricante({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
   const [showCreate, setShowCreate] = useState(false);
@@ -2555,70 +2626,7 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {sorted.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum pedido ainda.</div>}
         {sorted.map((o) => (
-          <Card key={o.id}>
-            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
-              <div style={{ display: "flex", gap: 10 }}>
-                <Avatar email={o.customerName || o.email} size={32} />
-                <div>
-                  <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
-                  <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
-                  {o.notes && <div style={{ fontSize: 12, color: "#8A7A63" }}>Obs.: {o.notes}</div>}
-                </div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-                <StatusBadge status={o.status} />
-                <PaymentBadge order={o} editable />
-              </div>
-            </div>
-            <div style={{ fontSize: 13, marginBottom: 8 }}>
-              {o.items.map((it, i) => (
-                <div key={i}>
-                  {it.qty}x Brownie {it.flavor} — {fmtBRL(it.unitPrice)}
-                  {it.returned > 0 && <span style={{ color: "#C4577A" }}> · ↩ {it.returned} devolvido(s)</span>}
-                  {it.customBand && <> <Badge tone="rose">cinta personalizada</Badge></>}
-                </div>
-              ))}
-            </div>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>{fmtBRL(o.total)}</div>
-            <ReturnsControl order={o} />
-            {o.deliveryPhoto && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <img src={o.deliveryPhoto} alt="Foto da entrega" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
-                <span style={{ fontSize: 12, color: "#8A7A63" }}>Foto de confirmação enviada pelo cliente</span>
-              </div>
-            )}
-            {o.paymentMethod === "Pix" && o.paymentProof && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <img src={o.paymentProof} alt="Comprovante Pix" style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover" }} />
-                <span style={{ fontSize: 12, color: "#8A7A63" }}>Comprovante Pix do cliente</span>
-              </div>
-            )}
-            {o.paymentType === "consignado" && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 12, color: "#8A7A63" }}>Consignado · vence em {new Date(o.paymentDueDate).toLocaleDateString("pt-BR")}</span>
-                <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
-                {o.paymentStatus !== "pago" && (
-                  <Btn variant="ghost" style={{ padding: "2px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
-                )}
-              </div>
-            )}
-            {o.salesReport && (
-              <div style={{ marginBottom: 8, fontSize: 12, color: "#8A7A63" }}>
-                <div style={{ fontWeight: 700, color: "#3D2419" }}>Vendas informadas pelo revendedor</div>
-                {o.salesReport.items.map((it) => <div key={it.lineKey || it.productId}>{it.flavor}{it.customBand ? " (cinta personalizada)" : ""}: {it.vendidos} vendidos, {it.restantes} restantes</div>)}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <select
-                value={o.status}
-                onChange={(e) => onUpdateStatus(o.id, e.target.value)}
-                style={{ padding: 8, borderRadius: 8, border: "1px solid #D3D1C7" }}
-              >
-                {[...STATUS_FLOW, STATUS_CANCELLED].map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <Btn variant="danger" style={{ padding: "8px 14px", fontSize: 13 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
-            </div>
-          </Card>
+          <OrderCard key={o.id} o={o} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
         ))}
       </div>
       )}
@@ -3019,27 +3027,8 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
           </div>
           {showCreateOrder && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreateOrder(false)} />}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {orders.map((o) => (
-              <Card key={o.id}>
-                <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-                  <div>
-                    <div style={{ fontWeight: 700 }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} {o.walkIn && <Badge tone="gold">sem cadastro</Badge>} {o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>} {o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
-                    <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}</div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <StatusBadge status={o.status} />
-                    <PaymentBadge order={o} editable />
-                    {o.paymentType === "consignado" && (
-                      <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
-                    )}
-                    {o.paymentType === "consignado" && o.paymentStatus !== "pago" && (
-                      <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
-                    )}
-                    <Btn variant="danger" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
-                  </div>
-                </div>
-                <ReturnsControl order={o} />
-              </Card>
+            {[...orders].sort((x, y) => new Date(y.date) - new Date(x.date)).map((o) => (
+              <OrderCard key={o.id} o={o} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
             ))}
           </div>
         </div>

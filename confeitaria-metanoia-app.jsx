@@ -2478,12 +2478,52 @@ function BellToggle({ role }) {
 // ---------- Fabricante ----------
 // Full order card shared by the Fabricante and Adm "Pedidos" tabs, so both
 // panels show the same details and controls.
-function OrderCard({ o, onUpdateStatus, onDeleteOrder, onMarkPaymentReceived }) {
+// Open/closed state per order id for the Pedidos lists (all start collapsed).
+function useOpenIds() {
+  const [map, setMap] = useState({});
+  return {
+    isOpen: (id) => !!map[id],
+    toggle: (id) => setMap((m) => ({ ...m, [id]: !m[id] })),
+    expandAll: (ids) => setMap(Object.fromEntries(ids.map((id) => [id, true]))),
+    collapseAll: () => setMap({}),
+  };
+}
+
+function OrderCard({ o, open, onToggle, onUpdateStatus, onDeleteOrder, onMarkPaymentReceived }) {
+  if (!open) {
+    // collapsed: one compact summary row
+    return (
+      <Card style={{ padding: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <div onClick={onToggle} role="button" tabIndex={0} aria-expanded="false" onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }} style={{ display: "flex", gap: 10, alignItems: "center", cursor: "pointer", minWidth: 0 }}>
+            <span style={{ fontSize: 14, color: "#8A7A63" }} title="Expandir detalhes">▸</span>
+            <div>
+              <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
+              <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {fmtBRL(o.total)}{(o.returnedUnits || 0) > 0 ? " · ↩ " + o.returnedUnits + " devolvido(s)" : ""}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <StatusBadge status={o.status} />
+            <PaymentBadge order={o} editable />
+            {o.paymentType === "consignado" && (
+              <Badge tone={o.paymentStatus === "pago" ? "green" : "gold"}>{o.paymentStatus === "pago" ? "pago" : "pagamento pendente"}</Badge>
+            )}
+            {o.paymentType === "consignado" && o.paymentStatus !== "pago" && (
+              <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onMarkPaymentReceived(o.id)}>Marcar pagamento recebido</Btn>
+            )}
+            <Btn variant="ghost" style={{ padding: "4px 10px", fontSize: 12 }} onClick={onToggle}>Ver detalhes</Btn>
+            <Btn variant="danger" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => onDeleteOrder(o.id)}>Excluir</Btn>
+          </div>
+        </div>
+      </Card>
+    );
+  }
   return (
     <Card>
       <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
         <div style={{ display: "flex", gap: 10 }}>
-          <Avatar email={o.customerName || o.email} size={32} />
+          <button onClick={onToggle} aria-expanded="true" title="Recolher" style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, color: "#8A7A63", padding: "0 2px", alignSelf: "flex-start" }}>▾</button>
+              <Avatar email={o.customerName || o.email} size={32} />
           <div>
             <div style={{ fontWeight: 700, color: "#3D2419" }}>{o.number != null && <span style={{ color: "#8B4A5C" }}>{fmtOrderNo(o)} · </span>}{orderWho(o)} <Badge tone={o.role === "revenda" ? "rose" : "gray"}>{o.role}</Badge>{o.walkIn && <Badge tone="gold">sem cadastro</Badge>}{o.orderType && <Badge tone={o.orderType === "reposicao" ? "rose" : "gray"}>{o.orderType === "reposicao" ? "reposição" : "novo pedido"}</Badge>}{o.isTest && <Badge tone="gold">🔔 teste</Badge>}</div>
             <div style={{ fontSize: 12, color: "#8A7A63" }}>{new Date(o.date).toLocaleString("pt-BR")} · {o.address} · {o.whatsapp}</div>
@@ -2550,6 +2590,7 @@ function OrderCard({ o, onUpdateStatus, onDeleteOrder, onMarkPaymentReceived }) 
 function Fabricante({ orders, products, stock, resellers, chats, cintaArts, currentEmail, onUpdateStatus, onApproveReseller, onRejectReseller, onToggleProduct, onDeleteOrder, onManualResellerToggle, onMarkPaymentReceived, onCreateTestOrder, onSendChatMessage }) {
   const [tab, setTab] = useState("pedidos");
   const [showCreate, setShowCreate] = useState(false);
+  const openIds = useOpenIds();
   const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
   const lowStock = stock.filter((s) => s.qty <= s.min);
   const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise").length;
@@ -2568,6 +2609,8 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
         {tab === "pedidos" && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Btn variant={showCreate ? "dark" : "primary"} onClick={() => setShowCreate((v) => !v)}>{showCreate ? "Fechar" : "+ Criar pedido"}</Btn>
+            <Btn variant="ghost" onClick={() => openIds.expandAll(sorted.map((x) => x.id))}>Expandir todos</Btn>
+            <Btn variant="ghost" onClick={openIds.collapseAll}>Recolher todos</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos.csv", [
               ["Nº", "Data", "Cliente", "Perfil", "Itens", "Total", "Endereço", "WhatsApp", "Status", "Pagamento"],
               ...sorted.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.items.map(itemLabel).join("; "), o.total.toFixed(2), o.address, o.whatsapp, o.status, paymentLabel(o)]),
@@ -2626,7 +2669,7 @@ function Fabricante({ orders, products, stock, resellers, chats, cintaArts, curr
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {sorted.length === 0 && <div style={{ fontSize: 13, color: "#8A7A63" }}>Nenhum pedido ainda.</div>}
         {sorted.map((o) => (
-          <OrderCard key={o.id} o={o} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
+          <OrderCard key={o.id} o={o} open={openIds.isOpen(o.id)} onToggle={() => openIds.toggle(o.id)} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
         ))}
       </div>
       )}
@@ -2800,6 +2843,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
   const [clientSearch, setClientSearch] = useState("");
   const [showManualTools, setShowManualTools] = useState(false);
   const [showCreateOrder, setShowCreateOrder] = useState(false);
+  const openIds = useOpenIds();
   const pendingCintas = (cintaArts || []).filter((a) => a.status === "solicitada" || a.status === "em_analise");
   const pendingResellers = resellers.filter((r) => r.status === "pendente");
   const activeResellers = resellers.filter((r) => r.status === "ativo");
@@ -3016,6 +3060,8 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
         <div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
             <Btn variant={showCreateOrder ? "dark" : "primary"} onClick={() => setShowCreateOrder((v) => !v)}>{showCreateOrder ? "Fechar" : "+ Criar pedido"}</Btn>
+            <Btn variant="ghost" onClick={() => openIds.expandAll(orders.map((x) => x.id))}>Expandir todos</Btn>
+            <Btn variant="ghost" onClick={openIds.collapseAll}>Recolher todos</Btn>
             <Btn variant="ghost" onClick={() => downloadCSV("pedidos_adm.csv", [
               ["Nº", "Data", "Cliente", "Perfil", "Total", "Status", "Pagamento"],
               ...orders.map((o) => [o.number != null ? o.number : "", new Date(o.date).toLocaleString("pt-BR"), orderWho(o), o.role, o.total.toFixed(2), o.status, paymentLabel(o)]),
@@ -3028,7 +3074,7 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
           {showCreateOrder && <ManualOrderForm products={products} mode="novo" onDone={() => setShowCreateOrder(false)} />}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {[...orders].sort((x, y) => new Date(y.date) - new Date(x.date)).map((o) => (
-              <OrderCard key={o.id} o={o} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
+              <OrderCard key={o.id} o={o} open={openIds.isOpen(o.id)} onToggle={() => openIds.toggle(o.id)} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} onMarkPaymentReceived={onMarkPaymentReceived} />
             ))}
           </div>
         </div>

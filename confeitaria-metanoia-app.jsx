@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, createContext, useContext } from "react";
 import { auth, db, googleProvider } from "./src/firebase.js";
 import { onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import { doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, collection, query, where, arrayUnion, runTransaction } from "firebase/firestore";
@@ -153,9 +153,27 @@ function itemLabel(it) {
 // What one custom-band art costs to develop: the first design is
 // CINTA_ART_FIRST_FEE, every other flavor of the same art is
 // CINTA_ART_EXTRA_FEE. Reseller-supplied files cost nothing to develop.
-function cintaCreationFees(existingArts, count) {
+function cintaCreationFees(existingArts, count, bandFees) {
   const baseExists = existingArts.some((a) => a.status !== "recusada");
-  return Array.from({ length: count }, (_, i) => (!baseExists && i === 0 ? CINTA_ART_FIRST_FEE : CINTA_ART_EXTRA_FEE));
+  return Array.from({ length: count }, (_, i) => (!baseExists && i === 0 ? bandFees.first : bandFees.extra));
+}
+// Band fees are editable by adm/fabricante (stored in the shared
+// "metanoia_settings" document); the constants above are the defaults.
+const DEFAULT_CINTA_FEES = { print: CINTA_PRINT_UNIT, first: CINTA_ART_FIRST_FEE, extra: CINTA_ART_EXTRA_FEE };
+const SettingsContext = createContext({ cintaFees: DEFAULT_CINTA_FEES });
+function useCintaFees() {
+  return useContext(SettingsContext).cintaFees;
+}
+function mergeSettings(raw) {
+  const pos = (v, d) => (typeof v === "number" && v >= 0 && Number.isFinite(v) ? v : d);
+  const r = raw && typeof raw === "object" ? raw : {};
+  return {
+    cintaFees: {
+      print: pos(r.cintaPrintUnit, DEFAULT_CINTA_FEES.print),
+      first: pos(r.cintaArtFirstFee, DEFAULT_CINTA_FEES.first),
+      extra: pos(r.cintaArtExtraFee, DEFAULT_CINTA_FEES.extra),
+    },
+  };
 }
 function fileToCompressedDataURL(file, maxW = 480, quality = 0.6) {
   return new Promise((resolve, reject) => {
@@ -386,7 +404,7 @@ function playConfirm(role) {
 // tagged kind:"order") instead of one big array: delivery-photo data URIs
 // attached to each order would otherwise push a single combined document
 // past Firestore's 1MB limit after a few dozen orders.
-const STORAGE_KEYS = ["metanoia_products", "metanoia_resellers", "metanoia_stock"];
+const STORAGE_KEYS = ["metanoia_products", "metanoia_resellers", "metanoia_stock", "metanoia_settings"];
 const METANOIA_COLLECTION = "metanoia";
 const ordersQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "order"));
 const chatsQueryRef = () => query(collection(db, METANOIA_COLLECTION), where("kind", "==", "chat"));
@@ -1389,6 +1407,7 @@ function CintaArtInfo({ art }) {
 }
 
 function CintaPanel({ email, products, arts }) {
+  const bandFees = useCintaFees();
   const inputStyle = { padding: 8, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box", width: "100%" };
   const myArts = arts.filter((a) => a.email === email).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const taken = new Set(myArts.filter((a) => a.status !== "recusada").map((a) => a.flavor));
@@ -1407,7 +1426,7 @@ function CintaPanel({ email, products, arts }) {
   const [msg, setMsg] = useState("");
 
   const pickedFlavors = available.filter((p) => picked[p.id]).map((p) => p.flavor);
-  const fees = cintaCreationFees(myArts, pickedFlavors.length);
+  const fees = cintaCreationFees(myArts, pickedFlavors.length, bandFees);
   const totalFee = fees.reduce((s, f) => s + f, 0);
 
   async function submitCreate() {
@@ -1471,10 +1490,10 @@ function CintaPanel({ email, products, arts }) {
         <div style={{ fontSize: 13, color: "#5F5E5A", lineHeight: 1.5 }}>
           Seus brownies com a cinta da sua marca.
           <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-            <li>Criação da arte: {fmtBRL(CINTA_ART_FIRST_FEE)} (primeiro sabor).</li>
-            <li>Mesma arte com o nome de outro sabor: {fmtBRL(CINTA_ART_EXTRA_FEE)} cada, só pelo desenvolvimento.</li>
-            <li>Com a arte pronta, você paga só {fmtBRL(CINTA_PRINT_UNIT)} por cinta impressa, somado ao valor de cada brownie — sem pagar o desenvolvimento de novo.</li>
-            <li>Já tem a sua arte em boa resolução? Envie em PDF ou CDR ({CINTA_SIZE_LABEL}) para a nossa equipe analisar: sem custo de criação, só os {fmtBRL(CINTA_PRINT_UNIT)} por cinta.</li>
+            <li>Criação da arte: {fmtBRL(bandFees.first)} (primeiro sabor).</li>
+            <li>Mesma arte com o nome de outro sabor: {fmtBRL(bandFees.extra)} cada, só pelo desenvolvimento.</li>
+            <li>Com a arte pronta, você paga só {fmtBRL(bandFees.print)} por cinta impressa, somado ao valor de cada brownie — sem pagar o desenvolvimento de novo.</li>
+            <li>Já tem a sua arte em boa resolução? Envie em PDF ou CDR ({CINTA_SIZE_LABEL}) para a nossa equipe analisar: sem custo de criação, só os {fmtBRL(bandFees.print)} por cinta.</li>
           </ul>
         </div>
       </Card>
@@ -1531,7 +1550,7 @@ function CintaPanel({ email, products, arts }) {
               <input type="checkbox" checked={sizeOk} onChange={(e) => setSizeOk(e.target.checked)} />
               Confirmo que o arquivo está na medida de {CINTA_SIZE_LABEL}
             </label>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>Sem custo de criação — só {fmtBRL(CINTA_PRINT_UNIT)} por cinta impressa.</div>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Sem custo de criação — só {fmtBRL(bandFees.print)} por cinta impressa.</div>
           </div>
         )}
 
@@ -1557,7 +1576,7 @@ function CintaPanel({ email, products, arts }) {
         </div>
         {myArts.some((a) => a.status === "pronta") && (
           <div style={{ fontSize: 12, color: "#27500A", marginTop: 10 }}>
-            Sabores com arte pronta aparecem na loja com a opção "cinta personalizada" (+{fmtBRL(CINTA_PRINT_UNIT)} por unidade).
+            Sabores com arte pronta aparecem na loja com a opção "cinta personalizada" (+{fmtBRL(bandFees.print)} por unidade).
           </div>
         )}
       </Card>
@@ -1623,6 +1642,7 @@ function CintaStaffPanel({ arts }) {
 }
 
 function Storefront({ email, role, products, orders, resellerInfo, cadastro, onSaveCadastro, onPlaceOrder, onRequestReseller, onConfirmDelivery, onSubmitSalesReport, chats, onSendChatMessage, cintaArts }) {
+  const bandFees = useCintaFees();
   const myChat = chats.find((c) => c.email === email);
   const [cart, setCart] = useState({});
   const [addr, setAddr] = useState("");
@@ -1645,12 +1665,12 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
   const activeProducts = products.filter((p) => p.active);
   const cartItems = Object.entries(cart).filter(([, q]) => q > 0);
   // Flavors whose custom-band art is ready: only those can be ordered with
-  // the band (price + CINTA_PRINT_UNIT per unit, no development fee again).
+  // the band (price + bandFees.print per unit, no development fee again).
   const readyFlavors = new Set((cintaArts || []).filter((a) => a.email === email && a.status === "pronta").map((a) => a.flavor));
   function lineInfo(key) {
     const { productId, custom } = parseLineKey(key);
     const product = products.find((pr) => pr.id === productId);
-    return { productId, custom, product, unit: productPrice(product, role) + (custom ? CINTA_PRINT_UNIT : 0) };
+    return { productId, custom, product, unit: productPrice(product, role) + (custom ? bandFees.print : 0) };
   }
   const total = cartItems.reduce((s, [key, q]) => s + q * lineInfo(key).unit, 0);
   const totalUnits = cartItems.reduce((s, [, q]) => s + q, 0);
@@ -1854,7 +1874,7 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed #E4E1D6", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 12, color: "#5F5E5A" }}>
                       Com cinta personalizada<br />
-                      <strong style={{ color: "#C4577A" }}>{fmtBRL(productPrice(p, role) + CINTA_PRINT_UNIT)}</strong> un.
+                      <strong style={{ color: "#C4577A" }}>{fmtBRL(productPrice(p, role) + bandFees.print)}</strong> un.
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <Btn variant="ghost" style={{ padding: "2px 10px" }} onClick={() => addQty(p.id + "#c", -1)}>-</Btn>
@@ -2666,6 +2686,56 @@ function Estoque({ stock, products, onUpdateStock, onAddIngredient, onRemoveIngr
 }
 
 // ---------- Adm ----------
+// Editable custom-band ("cinta") fees, shown in the Produtos tab.
+function CintaFeesEditor() {
+  const bandFees = useCintaFees();
+  const fmt = (n) => n.toFixed(2).replace(".", ",");
+  const [vals, setVals] = useState({ print: fmt(bandFees.print), first: fmt(bandFees.first), extra: fmt(bandFees.extra) });
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => { setVals({ print: fmt(bandFees.print), first: fmt(bandFees.first), extra: fmt(bandFees.extra) }); }, [bandFees.print, bandFees.first, bandFees.extra]);
+
+  const n = { print: parsePriceInput(vals.print), first: parsePriceInput(vals.first), extra: parsePriceInput(vals.extra) };
+  const changed = n.print !== bandFees.print || n.first !== bandFees.first || n.extra !== bandFees.extra;
+  const inputStyle = { width: 90, padding: 6, borderRadius: 8, border: "1px solid #D3D1C7", boxSizing: "border-box" };
+  const field = (key, label) => (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#5F5E5A" }}>
+      {label}
+      <input value={vals[key]} onChange={(e) => setVals((v) => ({ ...v, [key]: e.target.value }))} inputMode="decimal" style={inputStyle} aria-label={label} />
+    </label>
+  );
+
+  async function handleSave() {
+    if ([n.print, n.first, n.extra].some((x) => !(x >= 0 && x <= 9999)) || !(n.print > 0)) { setErr("Informe valores válidos (a taxa de impressão precisa ser maior que zero)."); setMsg(""); return; }
+    setErr(""); setSaving(true);
+    try {
+      await save("metanoia_settings", { cintaPrintUnit: n.print, cintaArtFirstFee: n.first, cintaArtExtraFee: n.extra });
+      setMsg("Taxas salvas!");
+      setTimeout(() => setMsg(""), 3000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card style={{ marginBottom: 14 }}>
+      <div style={{ fontWeight: 700, color: "#3D2419", marginBottom: 4 }}>Taxas da cinta personalizada (revenda)</div>
+      <div style={{ fontSize: 12, color: "#8A7A63", marginBottom: 10 }}>
+        A taxa de impressão é somada ao preço de cada brownie com cinta. As taxas de criação valem para as próximas artes solicitadas.
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        {field("print", "Impressão por cinta (R$)")}
+        {field("first", "Criação da arte — 1º sabor (R$)")}
+        {field("extra", "Mesma arte, outro sabor (R$)")}
+        <Btn disabled={!changed || saving} style={{ padding: "6px 14px", fontSize: 12 }} onClick={handleSave}>{saving ? "Salvando…" : "Salvar taxas"}</Btn>
+        {msg && <span style={{ fontSize: 12, color: "#27500A" }}>{msg}</span>}
+        {err && <span style={{ fontSize: 12, color: "#C4394A" }}>{err}</span>}
+      </div>
+    </Card>
+  );
+}
+
 // One row of the Produtos tab: on/off switch plus editable prices.
 function ProductRow({ p, products, onToggleProduct }) {
   const curCli = productPrice(p, "cliente");
@@ -2919,6 +2989,8 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
         </div>
       )}
 
+      {tab === "produtos" && <CintaFeesEditor />}
+
       {tab === "produtos" && (
         <Card>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2977,6 +3049,16 @@ function Adm({ bellRole = "adm", orders, products, stock, resellers, chats, cint
 }
 
 export default function App() {
+  const [settingsRaw, setSettingsRaw] = useState(null);
+  const settings = useMemo(() => mergeSettings(settingsRaw), [settingsRaw]);
+  return (
+    <SettingsContext.Provider value={settings}>
+      <AppInner onSettings={setSettingsRaw} />
+    </SettingsContext.Provider>
+  );
+}
+
+function AppInner({ onSettings }) {
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState(null);
   const [loggingIn, setLoggingIn] = useState(false);
@@ -3016,6 +3098,7 @@ export default function App() {
       if (data.metanoia_orders) setOrders(data.metanoia_orders);
       if (data.metanoia_chats) setChats(data.metanoia_chats);
       if (data.metanoia_cintaarts) setCintaArts(data.metanoia_cintaarts);
+      if (data.metanoia_settings) onSettings(data.metanoia_settings);
       if (data.metanoia_resellers) setResellers(data.metanoia_resellers);
       if (data.metanoia_stock) setStock(data.metanoia_stock);
       else await save("metanoia_stock", DEFAULT_STOCK);
@@ -3033,6 +3116,7 @@ export default function App() {
       else if (key === "metanoia_orders") setOrders(items);
       else if (key === "metanoia_chats") setChats(items);
       else if (key === "metanoia_cintaarts") setCintaArts(items);
+      else if (key === "metanoia_settings") onSettings(items);
       else if (key === "metanoia_resellers") setResellers(items);
       else if (key === "metanoia_stock") setStock(items);
     });

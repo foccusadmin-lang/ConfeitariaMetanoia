@@ -252,6 +252,8 @@ function buildPixCode(amount, txid) {
     description: "Doceria Metanoia",
   });
 }
+const SOCIAL_URL = "https://sites.google.com/view/portalevvuld/in%C3%ADcio";
+
 async function shareApp() {
   const shareData = {
     title: "Confeitaria Metanoia",
@@ -1815,6 +1817,14 @@ function Storefront({ email, role, products, orders, resellerInfo, cadastro, onS
           {role === "revenda" && <Btn variant={tab === "cinta" ? "dark" : "ghost"} onClick={() => setTab("cinta")}>Cinta personalizada</Btn>}
           <Btn variant={tab === "chat" ? "dark" : "ghost"} onClick={() => setTab("chat")}>Chat</Btn>
           <Btn variant="primary" onClick={() => setShowInvestModal(true)}>💚 Seja um investidor</Btn>
+          <a
+            href={SOCIAL_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 10, background: "#3D2419", color: "#fff", fontSize: 14, fontWeight: 600, textDecoration: "none" }}
+          >
+            📲 Siga-nos nas redes sociais
+          </a>
         </div>
       </div>
 
